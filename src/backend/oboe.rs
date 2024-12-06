@@ -124,7 +124,7 @@ impl AudioOutputCallback for OboeCallback {
         error: oboe::Error,
     ) {
         eprintln!("audio error: {error:?}");
-        //self.broken.store(true, Ordering::Relaxed);
+        self.broken.store(true, Ordering::Relaxed);
     }
 
     fn on_error_after_close(
@@ -133,6 +133,6 @@ impl AudioOutputCallback for OboeCallback {
         error: oboe::Error,
     ) {
         eprintln!("audio error: {error:?}");
-        //self.broken.store(true, Ordering::Relaxed);
+        self.broken.store(true, Ordering::Relaxed);
     }
 }
