@@ -91,7 +91,7 @@ impl OboeCallback {
 }
 
 impl AudioOutputCallback for OboeCallback {
-    type FrameType = (f32, Stereo);
+    type FrameType = (Unspecified, Stereo);
 
     fn on_audio_ready(
         &mut self,
