@@ -55,7 +55,7 @@ impl Backend for OboeBackend {
             .set_usage(self.settings.usage)
             .set_performance_mode(self.settings.performance_mode)
             .set_sharing_mode(SharingMode::Exclusive)
-            .set_format::<i16>()
+            .set_format::<f32>()
             .set_channel_count::<Stereo>()
             .set_callback(OboeCallback::new(
                 Arc::clone(self.state.as_ref().unwrap()),
@@ -91,12 +91,12 @@ impl OboeCallback {
 }
 
 impl AudioOutputCallback for OboeCallback {
-    type FrameType = (i16, Stereo);
+    type FrameType = (f32, Stereo);
 
     fn on_audio_ready(
         &mut self,
         stream: &mut dyn AudioOutputStreamSafe,
-        frames: &mut [(i16, i16)],
+        frames: &mut [(f32, f32)],
     ) -> DataCallbackResult {
         if let Some(buffer_size) = &self.buffer_size {
             let _ = stream.set_buffer_size_in_frames(
@@ -111,7 +111,7 @@ impl AudioOutputCallback for OboeCallback {
         mixer.sample_rate = stream.get_sample_rate() as u32;
         let raw = frames.as_mut_ptr();
         mixer.render_stereo(unsafe {
-            std::slice::from_raw_parts_mut(raw as *mut i16, frames.len() * 2)
+            std::slice::from_raw_parts_mut(raw as *mut f32, frames.len() * 2)
         });
 
         DataCallbackResult::Continue
