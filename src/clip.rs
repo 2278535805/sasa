@@ -28,7 +28,7 @@ impl AudioClip {
     pub fn decode(data: Vec<u8>) -> Result<(Vec<Frame>, u32)> {
         fn load_frames_from_buffer(
             frames: &mut Vec<Frame>,
-            buffer: &symphonia::core::audio::AudioBuffer<i16>,
+            buffer: &symphonia::core::audio::AudioBuffer<f32>,
         ) {
             match buffer.spec().channels.count() {
                 1 => {
@@ -60,13 +60,13 @@ impl AudioClip {
             }
             use AudioBufferRef::*;
             match buffer {
-                F32(buffer) => conv!(buffer),
+                F32(buffer) => load_frames_from_buffer(frames, buffer),
                 U8(buffer) => conv!(buffer),
                 U16(buffer) => conv!(buffer),
                 U24(buffer) => conv!(buffer),
                 U32(buffer) => conv!(buffer),
                 S8(buffer) => conv!(buffer),
-                S16(buffer) => load_frames_from_buffer(frames, buffer),
+                S16(buffer) => conv!(buffer),
                 S24(buffer) => conv!(buffer),
                 S32(buffer) => conv!(buffer),
                 F64(buffer) => conv!(buffer),
@@ -126,12 +126,12 @@ impl AudioClip {
         Ok(Self::from_raw(frames, sample_rate))
     }
 
-    pub fn sample(&self, position: i16) -> Option<Frame> {
-        let position = position * self.0.sample_rate as i16;
+    pub fn sample(&self, position: f32) -> Option<Frame> {
+        let position = position * self.0.sample_rate as f32;
         let actual_index = position as usize;
         if let Some(frame) = self.0.frames.get(actual_index) {
             let next_frame = self.0.frames.get(actual_index + 1).unwrap_or(frame);
-            Some(frame.interpolate(next_frame, position - actual_index as i16))
+            Some(frame.interpolate(next_frame, position - actual_index as f32))
         } else {
             None
         }
@@ -152,7 +152,7 @@ impl AudioClip {
         self.0.frames.len()
     }
 
-    pub fn length(&self) -> i16 {
-        (self.frame_count() as f32 / self.sample_rate() as f32) as i16
+    pub fn length(&self) -> f32 {
+        self.frame_count() as f32 / self.sample_rate() as f32
     }
 }
