@@ -96,7 +96,7 @@ impl AudioOutputCallback for OboeCallback {
     fn on_audio_ready(
         &mut self,
         stream: &mut dyn AudioOutputStreamSafe,
-        frames: &mut [(f32, f32)],
+        frames: &mut [(oboe::Unspecified, oboe::Unspecified)],
     ) -> DataCallbackResult {
         if let Some(buffer_size) = &self.buffer_size {
             let _ = stream.set_buffer_size_in_frames(

@@ -1,5 +1,5 @@
 use crate::Backend;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{/*anyhow, */Context, Result};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     BufferSize, OutputCallbackInfo, Stream, StreamError,
