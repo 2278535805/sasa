@@ -73,7 +73,7 @@ impl Backend for CpalBackend {
         let stream = (if config.channels == 1 {
             device.build_output_stream(
                 &config,
-                move |data: &mut [f32], info: &OutputCallbackInfo| {
+                move |data: &mut [i16], info: &OutputCallbackInfo| {
                     let (mixer, rec) = state.get();
                     mixer.render_mono(data);
                     let ts = info.timestamp();
@@ -86,7 +86,7 @@ impl Backend for CpalBackend {
         } else {
             device.build_output_stream(
                 &config,
-                move |data: &mut [f32], info: &OutputCallbackInfo| {
+                move |data: &mut [i16], info: &OutputCallbackInfo| {
                     let (mixer, rec) = state.get();
                     mixer.render_stereo(data);
                     let ts = info.timestamp();

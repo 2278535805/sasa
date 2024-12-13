@@ -29,9 +29,9 @@ impl Mixer {
         }
     }
 
-    pub fn render_mono(&mut self, data: &mut [f32]) {
+    pub fn render_mono(&mut self, data: &mut [i16]) {
         self.consume_commands();
-        data.fill(0.);
+        data.fill(0);
 
         self.renderers.retain_mut(|renderer| {
             renderer.render_mono(self.sample_rate, data);
@@ -39,9 +39,9 @@ impl Mixer {
         });
     }
 
-    pub fn render_stereo(&mut self, data: &mut [f32]) {
+    pub fn render_stereo(&mut self, data: &mut [i16]) {
         self.consume_commands();
-        data.fill(0.);
+        data.fill(0);
 
         self.renderers.retain_mut(|renderer| {
             renderer.render_stereo(self.sample_rate, data);

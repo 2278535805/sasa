@@ -26,13 +26,13 @@ fn buffer_is_full<E>(_: E) -> anyhow::Error {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct Frame(pub f32, pub f32);
+pub struct Frame(pub i16, pub i16);
 impl Frame {
-    pub fn avg(&self) -> f32 {
-        (self.0 + self.1) / 2.
+    pub fn avg(&self) -> i16 {
+        (self.0 + self.1) / 2
     }
 
-    pub fn interpolate(&self, other: &Self, f: f32) -> Self {
+    pub fn interpolate(&self, other: &Self, f: i16) -> Self {
         Self(
             self.0 + (other.0 - self.0) * f,
             self.1 + (other.1 - self.1) * f,
@@ -46,10 +46,10 @@ impl Add for Frame {
         Self(self.0 + rhs.0, self.1 + rhs.1)
     }
 }
-impl Mul<f32> for Frame {
+impl Mul<i16> for Frame {
     type Output = Self;
 
-    fn mul(self, rhs: f32) -> Self::Output {
+    fn mul(self, rhs: i16) -> Self::Output {
         Self(self.0 * rhs, self.1 * rhs)
     }
 }

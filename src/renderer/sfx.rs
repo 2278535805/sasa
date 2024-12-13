@@ -5,18 +5,18 @@ use std::sync::{Arc, Weak};
 
 #[derive(Debug, Clone)]
 pub struct PlaySfxParams {
-    pub amplifier: f32,
+    pub amplifier: i16,
 }
 impl Default for PlaySfxParams {
     fn default() -> Self {
-        Self { amplifier: 1. }
+        Self { amplifier: 1 }
     }
 }
 
 pub(crate) struct SfxRenderer {
     clip: AudioClip,
     arc: Weak<()>,
-    cons: HeapConsumer<(f32, PlaySfxParams)>,
+    cons: HeapConsumer<(i16, PlaySfxParams)>,
 }
 
 impl Renderer for SfxRenderer {
@@ -24,8 +24,8 @@ impl Renderer for SfxRenderer {
         !self.cons.is_empty() || self.arc.strong_count() != 0
     }
 
-    fn render_mono(&mut self, sample_rate: u32, data: &mut [f32]) {
-        let delta = 1. / sample_rate as f32;
+    fn render_mono(&mut self, sample_rate: u32, data: &mut [i16]) {
+        let delta = 1 / sample_rate as i16;
         let mut pop_count = 0;
         for (position, params) in self.cons.iter_mut() {
             for sample in data.iter_mut() {
@@ -43,8 +43,8 @@ impl Renderer for SfxRenderer {
         }
     }
 
-    fn render_stereo(&mut self, sample_rate: u32, data: &mut [f32]) {
-        let delta = 1. / sample_rate as f32;
+    fn render_stereo(&mut self, sample_rate: u32, data: &mut [i16]) {
+        let delta = 1 / sample_rate as i16;
         let mut pop_count = 0;
         for (position, params) in self.cons.iter_mut() {
             for sample in data.chunks_exact_mut(2) {
@@ -66,7 +66,7 @@ impl Renderer for SfxRenderer {
 
 pub struct Sfx {
     _arc: Arc<()>,
-    prod: HeapProducer<(f32, PlaySfxParams)>,
+    prod: HeapProducer<(i16, PlaySfxParams)>,
 }
 impl Sfx {
     pub(crate) fn new(clip: AudioClip, buffer_size: Option<usize>) -> (Sfx, SfxRenderer) {
@@ -82,7 +82,7 @@ impl Sfx {
 
     pub fn play(&mut self, params: PlaySfxParams) -> Result<()> {
         self.prod
-            .push((0., params))
+            .push((0, params))
             .map_err(buffer_is_full)
             .context("play sfx")
     }
