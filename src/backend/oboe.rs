@@ -4,7 +4,7 @@ use super::{BackendSetup, StateCell};
 use crate::Backend;
 use anyhow::Result;
 use oboe::{
-    AudioFormat, AudioOutputCallback, AudioOutputStreamSafe, AudioStream, AudioStreamAsync, AudioStreamBuilder, DataCallbackResult, Output, SharingMode, Stereo
+    AudioFormat, AudioOutputCallback, AudioOutputStreamSafe, AudioStream, AudioStreamAsync, AudioStreamBuilder, DataCallbackResult, Output, SharingMode, Stereo, Unspecified
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
