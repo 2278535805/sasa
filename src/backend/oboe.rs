@@ -4,7 +4,7 @@ use super::{BackendSetup, StateCell};
 use crate::Backend;
 use anyhow::Result;
 use oboe::{
-    AudioOutputCallback, AudioOutputStreamSafe, AudioStream, AudioStreamAsync, AudioStreamBuilder, DataCallbackResult, Output, Stereo
+    AudioFormat, AudioOutputCallback, AudioOutputStreamSafe, AudioStream, AudioStreamAsync, AudioStreamBuilder, DataCallbackResult, Output, Stereo, Unspecified
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -58,6 +58,7 @@ impl Backend for OboeBackend {
             .set_performance_mode(self.settings.performance_mode)
             .set_sharing_mode(self.settings.sharing_mode)
             .set_channel_count::<Stereo>()
+            .set_format::<f32>()
             .set_callback(OboeCallback::new(
                 Arc::clone(self.state.as_ref().unwrap()),
                 Arc::clone(&self.broken),
