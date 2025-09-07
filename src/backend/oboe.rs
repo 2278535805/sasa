@@ -4,7 +4,7 @@ use super::{BackendSetup, StateCell};
 use crate::Backend;
 use anyhow::Result;
 use oboe::{
-    AudioFormat, AudioOutputCallback, AudioOutputStreamSafe, AudioStream, AudioStreamAsync, AudioStreamBuilder, DataCallbackResult, Output, Stereo, Unspecified
+    AudioOutputCallback, AudioOutputStreamSafe, AudioStream, AudioStreamAsync, AudioStreamBuilder, DataCallbackResult, Output, Stereo
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -92,12 +92,12 @@ impl OboeCallback {
 }
 
 impl AudioOutputCallback for OboeCallback {
-    type FrameType = (AudioFormat::F32, Stereo);
+    type FrameType = (f32, Stereo);
 
     fn on_audio_ready(
         &mut self,
         stream: &mut dyn AudioOutputStreamSafe,
-        frames: &mut [(AudioFormat::F32, AudioFormat::F32)],
+        frames: &mut [(f32, f32)],
     ) -> DataCallbackResult {
         if let Some(buffer_size) = &self.buffer_size {
             let _ = stream.set_buffer_size_in_frames(
