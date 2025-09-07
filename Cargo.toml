@@ -15,7 +15,7 @@ ringbuf = "0.3.3"
 symphonia = { version = "0.5.2", features = ["mp3", "aac"] }
 thiserror = "2.0.16"
 
-oboe = { version = "0.6.1", optional = true, features = [] }
+oboe = { version = "0.6.1", optional = true, features = ["shared-stdcxx"] }
 atomic_float = "1.1.0"
 
 [dev-dependencies]
