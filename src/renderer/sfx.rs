@@ -38,6 +38,9 @@ impl Renderer for SfxRenderer {
                 *position += delta;
             }
         }
+        for sample in data.iter_mut() {
+            *sample = sample.clamp(-1.0, 1.0);
+        }
         unsafe {
             self.cons.advance(pop_count);
         }
@@ -57,6 +60,10 @@ impl Renderer for SfxRenderer {
                 }
                 *position += delta;
             }
+        }
+        for sample in data.chunks_exact_mut(2) {
+            sample[0] = sample[0].clamp(-1.0, 1.0);
+            sample[1] = sample[1].clamp(-1.0, 1.0);
         }
         unsafe {
             self.cons.advance(pop_count);
