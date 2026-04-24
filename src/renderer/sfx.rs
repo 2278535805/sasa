@@ -76,8 +76,10 @@ pub struct Sfx {
     prod: HeapProducer<(f64, PlaySfxParams)>,
 }
 impl Sfx {
+    pub const DEFAULT_BUFFER_SIZE: usize = 64;
+
     pub(crate) fn new(clip: AudioClip, buffer_size: Option<usize>) -> (Sfx, SfxRenderer) {
-        let (prod, cons) = HeapRb::new(buffer_size.unwrap_or(64)).split();
+        let (prod, cons) = HeapRb::new(buffer_size.unwrap_or(Self::DEFAULT_BUFFER_SIZE)).split();
         let arc = Arc::new(());
         let renderer = SfxRenderer {
             clip,
