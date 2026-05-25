@@ -3,9 +3,7 @@ pub use oboe::{PerformanceMode, SharingMode, Usage};
 use super::{BackendSetup, StateCell};
 use crate::Backend;
 use anyhow::Result;
-use oboe::{
-    AudioFormat, AudioOutputCallback, AudioOutputStreamSafe, AudioStream, AudioStreamAsync, AudioStreamBuilder, DataCallbackResult, Output, Stereo, Unspecified
-};
+use oboe::{AudioApi, AudioFormat, AudioOutputCallback, AudioOutputStreamSafe, AudioStream, AudioStreamAsync, AudioStreamBuilder, DataCallbackResult, Output, Stereo, Unspecified};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -14,6 +12,7 @@ use std::sync::{
 pub struct OboeSettings {
     pub buffer_size: Option<u32>,
     pub performance_mode: PerformanceMode,
+    pub audio_api: AudioApi,
     pub sharing_mode: SharingMode,
     pub usage: Usage,
 }
@@ -22,6 +21,7 @@ impl Default for OboeSettings {
         Self {
             buffer_size: None,
             performance_mode: PerformanceMode::None,
+            audio_api: AudioApi::Unspecified,
             sharing_mode: SharingMode::Shared,
             usage: Usage::Media,
         }
@@ -55,6 +55,7 @@ impl Backend for OboeBackend {
     fn start(&mut self) -> Result<()> {
         let mut stream = AudioStreamBuilder::default()
             .set_usage(self.settings.usage)
+            .set_audio_api(self.settings.audio_api)
             .set_performance_mode(self.settings.performance_mode)
             .set_sharing_mode(self.settings.sharing_mode)
             .set_channel_count::<Stereo>()
