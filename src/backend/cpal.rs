@@ -1,15 +1,15 @@
-use crate::Backend;
+use crate::{Backend, RecorderBackend};
 use anyhow::{Context, Result};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    BufferSize, OutputCallbackInfo, Stream, StreamError,
+    BufferSize, InputCallbackInfo, OutputCallbackInfo, Stream, StreamError,
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 
-use super::{BackendSetup, StateCell};
+use super::{BackendSetup, RecorderBackendSetup, RecorderStateCell, StateCell};
 
 #[derive(Debug, Clone, Default)]
 pub struct CpalSettings {
@@ -97,6 +97,97 @@ impl Backend for CpalBackend {
             )
         })
         .context("failed to build stream")?;
+        stream.play()?;
+        self.stream = Some(stream);
+        Ok(())
+    }
+
+    fn consume_broken(&self) -> bool {
+        self.broken.fetch_and(false, Ordering::Relaxed)
+    }
+}
+
+pub struct CpalRecorderBackend {
+    settings: CpalSettings,
+    stream: Option<Stream>,
+    broken: Arc<AtomicBool>,
+    state: Option<Arc<RecorderStateCell>>,
+}
+
+impl CpalRecorderBackend {
+    pub fn new(settings: CpalSettings) -> Self {
+        Self {
+            settings,
+            stream: None,
+            broken: Arc::default(),
+            state: None,
+        }
+    }
+}
+
+impl RecorderBackend for CpalRecorderBackend {
+    fn setup(&mut self, setup: RecorderBackendSetup) -> Result<()> {
+        self.state = Some(Arc::new(setup.into()));
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<()> {
+        let host = cpal::default_host();
+        let device = match host.default_input_device() {
+            Some(device) => device,
+            None => {
+                eprintln!("no default input device is found");
+                return Ok(());
+            }
+        };
+        let mut config = device
+            .default_input_config()
+            .context("cannot get input config")?
+            .config();
+        config.buffer_size = self
+            .settings
+            .buffer_size
+            .map_or(BufferSize::Default, |it| BufferSize::Fixed(it));
+
+        let broken = Arc::clone(&self.broken);
+        let error_callback = move |err| {
+            eprintln!("audio input error: {err:?}");
+            if matches!(err, StreamError::DeviceNotAvailable) {
+                broken.store(true, Ordering::Relaxed);
+            }
+        };
+        let state = Arc::clone(self.state.as_ref().unwrap());
+        state.get().0.sample_rate = config.sample_rate.0;
+        let stream = (if config.channels == 1 {
+            device.build_input_stream(
+                &config,
+                move |data: &[f32], info: &InputCallbackInfo| {
+                    let (mixer, rec) = state.get();
+                    mixer.record_mono(data);
+                    let ts = info.timestamp();
+                    if let Some(delay) = ts.capture.duration_since(&ts.callback) {
+                        rec.push(delay.as_secs_f64());
+                    }
+                },
+                error_callback,
+                None,
+            )
+        } else {
+            device.build_input_stream(
+                &config,
+                move |data: &[f32], info: &InputCallbackInfo| {
+                    let (mixer, rec) = state.get();
+                    mixer.record_stereo(data);
+                    let ts = info.timestamp();
+                    if let Some(delay) = ts.capture.duration_since(&ts.callback) {
+                        rec.push(delay.as_secs_f64());
+                    }
+                },
+                error_callback,
+                None,
+            )
+        })
+        .context("failed to build input stream")?;
         stream.play()?;
         self.stream = Some(stream);
         Ok(())
