@@ -74,13 +74,14 @@ impl Backend for OhosBackend {
     fn start(&mut self) -> Result<()> {
         unsafe {
             let mut builder: *mut OH_AudioStreamBuilder = ptr::null_mut();
-            let sample_rate = self.settings.sample_rate.unwrap_or(48000) as i32;
             let channels = self.settings.channels as i32;
             OH_AudioStreamBuilder_Create(
                 &mut builder as *mut *mut OH_AudioStreamBuilder,
                 OH_AudioStream_Type_AUDIOSTREAM_TYPE_RENDERER,
             );
-            OH_AudioStreamBuilder_SetSamplingRate(builder, sample_rate);
+            if let Some(sample_rate) = self.settings.sample_rate {
+                OH_AudioStreamBuilder_SetSamplingRate(builder, sample_rate as i32);
+            }
             OH_AudioStreamBuilder_SetChannelCount(builder, channels);
             OH_AudioStreamBuilder_SetSampleFormat(
                 builder,
