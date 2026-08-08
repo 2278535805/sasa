@@ -17,23 +17,73 @@ use ohos_audio_sys::{
     OH_AudioRenderer_Start, OH_AudioStreamBuilder, OH_AudioStreamBuilder_Create,
     OH_AudioStreamBuilder_Destroy, OH_AudioStreamBuilder_GenerateCapturer,
     OH_AudioStreamBuilder_GenerateRenderer, OH_AudioStreamBuilder_SetCapturerCallback,
-    OH_AudioStreamBuilder_SetChannelCount, OH_AudioStreamBuilder_SetFrameSizeInCallback,
-    OH_AudioStreamBuilder_SetLatencyMode, OH_AudioStreamBuilder_SetRendererCallback,
-    OH_AudioStreamBuilder_SetRendererInfo, OH_AudioStreamBuilder_SetSampleFormat,
-    OH_AudioStreamBuilder_SetSamplingRate,
+    OH_AudioStreamBuilder_SetCapturerInfo, OH_AudioStreamBuilder_SetChannelCount,
+    OH_AudioStreamBuilder_SetFrameSizeInCallback, OH_AudioStreamBuilder_SetLatencyMode,
+    OH_AudioStreamBuilder_SetRendererCallback, OH_AudioStreamBuilder_SetRendererInfo,
+    OH_AudioStreamBuilder_SetSampleFormat, OH_AudioStreamBuilder_SetSamplingRate,
     OH_AudioStream_LatencyMode_AUDIOSTREAM_LATENCY_MODE_FAST,
+    OH_AudioStream_LatencyMode_AUDIOSTREAM_LATENCY_MODE_NORMAL,
     OH_AudioStream_SampleFormat_AUDIOSTREAM_SAMPLE_F32LE,
+    OH_AudioStream_SourceType_AUDIOSTREAM_SOURCE_TYPE_MIC,
     OH_AudioStream_Type_AUDIOSTREAM_TYPE_CAPTURER,
-    OH_AudioStream_Type_AUDIOSTREAM_TYPE_RENDERER, OH_AudioStream_Usage_AUDIOSTREAM_USAGE_GAME,
+    OH_AudioStream_Type_AUDIOSTREAM_TYPE_RENDERER,
+    OH_AudioStream_Usage,
+    OH_AudioStream_Usage_AUDIOSTREAM_USAGE_GAME,
+    OH_AudioStream_Usage_AUDIOSTREAM_USAGE_MOVIE,
+    OH_AudioStream_Usage_AUDIOSTREAM_USAGE_MUSIC,
+    OH_AudioStream_Usage_AUDIOSTREAM_USAGE_VOICE_COMMUNICATION,
+    OH_AudioStream_Usage_AUDIOSTREAM_USAGE_VOICE_ASSISTANT,
 };
 use super::{BackendSetup, RecorderBackendSetup, RecorderStateCell, StateCell};
 use crate::{Backend, RecorderBackend};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OhosLatencyMode {
+    Normal,
+    Fast,
+}
+
+impl OhosLatencyMode {
+    fn as_sys(&self) -> u32 {
+        match self {
+            OhosLatencyMode::Normal => OH_AudioStream_LatencyMode_AUDIOSTREAM_LATENCY_MODE_NORMAL,
+            OhosLatencyMode::Fast => OH_AudioStream_LatencyMode_AUDIOSTREAM_LATENCY_MODE_FAST,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OhosUsage {
+    Music,
+    VoiceCommunication,
+    VoiceAssistant,
+    Movie,
+    Game,
+}
+
+impl OhosUsage {
+    fn as_sys(&self) -> OH_AudioStream_Usage {
+        match self {
+            OhosUsage::Music => OH_AudioStream_Usage_AUDIOSTREAM_USAGE_MUSIC,
+            OhosUsage::VoiceCommunication => {
+                OH_AudioStream_Usage_AUDIOSTREAM_USAGE_VOICE_COMMUNICATION
+            }
+            OhosUsage::VoiceAssistant => {
+                OH_AudioStream_Usage_AUDIOSTREAM_USAGE_VOICE_ASSISTANT
+            }
+            OhosUsage::Movie => OH_AudioStream_Usage_AUDIOSTREAM_USAGE_MOVIE,
+            OhosUsage::Game => OH_AudioStream_Usage_AUDIOSTREAM_USAGE_GAME,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct OhosSettings {
     pub buffer_size: Option<u32>,
     pub sample_rate: Option<u32>,
     pub channels: u16,
+    pub latency_mode: OhosLatencyMode,
+    pub usage: OhosUsage,
 }
 
 impl Default for OhosSettings {
@@ -42,6 +92,8 @@ impl Default for OhosSettings {
             buffer_size: None,
             sample_rate: None,
             channels: 2,
+            latency_mode: OhosLatencyMode::Fast,
+            usage: OhosUsage::Game,
         }
     }
 }
@@ -92,12 +144,11 @@ impl Backend for OhosBackend {
             );
             OH_AudioStreamBuilder_SetLatencyMode(
                 builder,
-                OH_AudioStream_LatencyMode_AUDIOSTREAM_LATENCY_MODE_FAST,
+                self.settings.latency_mode.as_sys(),
             );
-            // 设置渲染器使用场景为游戏
             OH_AudioStreamBuilder_SetRendererInfo(
                 builder,
-                OH_AudioStream_Usage_AUDIOSTREAM_USAGE_GAME,
+                self.settings.usage.as_sys(),
             );
 
             if let Some(buffer_size) = self.settings.buffer_size {
@@ -257,7 +308,11 @@ impl RecorderBackend for OhosRecorderBackend {
             );
             OH_AudioStreamBuilder_SetLatencyMode(
                 builder,
-                OH_AudioStream_LatencyMode_AUDIOSTREAM_LATENCY_MODE_FAST,
+                self.settings.latency_mode.as_sys(),
+            );
+            OH_AudioStreamBuilder_SetCapturerInfo(
+                builder,
+                OH_AudioStream_SourceType_AUDIOSTREAM_SOURCE_TYPE_MIC,
             );
 
             if let Some(buffer_size) = self.settings.buffer_size {
