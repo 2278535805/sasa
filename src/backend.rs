@@ -8,14 +8,15 @@ pub mod oboe;
 pub mod ohos;
 
 use crate::{
-    mixer::{Mixer, MixerCommand},
+    mixer::{RecorderMixer, RecorderMixerCommand},
+    mixer::{Mixer, RenderMixerCommand},
     LatencyRecorder,
 };
 use anyhow::Result;
 use ringbuf::HeapConsumer;
 
 pub struct BackendSetup {
-    pub(crate) mixer_cons: HeapConsumer<MixerCommand>,
+    pub(crate) mixer_cons: HeapConsumer<RenderMixerCommand>,
     pub(crate) latency_rec: LatencyRecorder,
 }
 
@@ -43,6 +44,42 @@ impl From<BackendSetup> for StateCell {
     fn from(value: BackendSetup) -> Self {
         Self {
             _data: (Mixer::new(0, value.mixer_cons), value.latency_rec),
+        }
+    }
+}
+
+pub struct RecorderBackendSetup {
+    pub(crate) mixer_cons: HeapConsumer<RecorderMixerCommand>,
+    pub(crate) latency_rec: LatencyRecorder,
+}
+
+pub trait RecorderBackend {
+    fn setup(&mut self, setup: RecorderBackendSetup) -> Result<()>;
+    fn start(&mut self) -> Result<()>;
+    fn consume_broken(&self) -> bool;
+}
+
+#[repr(transparent)]
+pub(crate) struct RecorderStateCell {
+    _data: (RecorderMixer, LatencyRecorder),
+}
+
+impl RecorderStateCell {
+    pub fn get(&self) -> &mut (RecorderMixer, LatencyRecorder) {
+        #[allow(invalid_reference_casting)]
+        unsafe {
+            &mut *(self as *const RecorderStateCell as *const (RecorderMixer, LatencyRecorder) as *mut _)
+        }
+    }
+}
+
+impl From<RecorderBackendSetup> for RecorderStateCell {
+    fn from(value: RecorderBackendSetup) -> Self {
+        Self {
+            _data: (
+                RecorderMixer::new(0, value.mixer_cons),
+                value.latency_rec,
+            ),
         }
     }
 }

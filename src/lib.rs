@@ -1,7 +1,7 @@
 /// Simple And Stupid Audio for Rust, optimized for low latency.
 pub mod backend;
 use atomic_float::AtomicF64;
-pub use backend::Backend;
+pub use backend::{Backend, RecorderBackend};
 
 mod clip;
 pub use clip::AudioClip;
@@ -11,7 +11,14 @@ mod mixer;
 mod renderer;
 pub use renderer::{Music, MusicParams, PlaySfxParams, Renderer, Sfx};
 
-use crate::{backend::BackendSetup, mixer::MixerCommand};
+pub mod recorder;
+pub use recorder::{Recorder, Record};
+
+use crate::{
+    backend::{BackendSetup, RecorderBackendSetup},
+    mixer::RecorderMixerCommand,
+    mixer::RenderMixerCommand,
+};
 use anyhow::{anyhow, Context, Result};
 use ringbuf::{HeapProducer, HeapRb};
 use std::{
@@ -100,7 +107,7 @@ impl LatencyRecorder {
 pub struct AudioManager {
     backend: Box<dyn Backend>,
     latency: Arc<AtomicF64>,
-    prod: HeapProducer<MixerCommand>,
+    prod: HeapProducer<RenderMixerCommand>,
 }
 
 impl AudioManager {
@@ -138,9 +145,73 @@ impl AudioManager {
 
     pub fn add_renderer(&mut self, renderer: impl Renderer + 'static) -> Result<()> {
         self.prod
-            .push(MixerCommand::AddRenderer(Box::new(renderer)))
+            .push(RenderMixerCommand::AddRenderer(Box::new(renderer)))
             .map_err(buffer_is_full)
             .context("add renderer")?;
+        Ok(())
+    }
+
+    pub fn estimate_latency(&self) -> f64 {
+        self.latency.load(Ordering::SeqCst)
+    }
+
+    #[inline(always)]
+    pub fn consume_broken(&self) -> bool {
+        self.backend.consume_broken()
+    }
+
+    #[inline(always)]
+    pub fn start(&mut self) -> Result<()> {
+        self.backend.start()
+    }
+
+    pub fn recover_if_needed(&mut self) -> Result<()> {
+        if self.consume_broken() {
+            self.start()
+        } else {
+            Ok(())
+        }
+    }
+}
+
+pub struct AudioRecorder {
+    backend: Box<dyn RecorderBackend>,
+    latency: Arc<AtomicF64>,
+    prod: HeapProducer<RecorderMixerCommand>,
+}
+
+impl AudioRecorder {
+    pub fn new(backend: impl RecorderBackend + 'static) -> Result<Self> {
+        Self::new_box(Box::new(backend))
+    }
+
+    pub fn new_box(mut backend: Box<dyn RecorderBackend>) -> Result<Self> {
+        let (prod, cons) = HeapRb::new(16).split();
+        let latency: Arc<AtomicF64> = Arc::default();
+        let latency_rec = LatencyRecorder::new(Arc::clone(&latency));
+        backend.setup(RecorderBackendSetup {
+            mixer_cons: cons,
+            latency_rec,
+        })?;
+        backend.start()?;
+        Ok(Self {
+            backend,
+            latency,
+            prod,
+        })
+    }
+
+    pub fn create(&mut self, buffer_size: Option<usize>) -> Result<Record> {
+        let (record, record_recorder) = Record::new(buffer_size);
+        self.add_recorder(record_recorder)?;
+        Ok(record)
+    }
+
+    pub fn add_recorder(&mut self, recorder: impl Recorder + 'static) -> Result<()> {
+        self.prod
+            .push(RecorderMixerCommand::AddRecorder(Box::new(recorder)))
+            .map_err(buffer_is_full)
+            .context("add recorder")?;
         Ok(())
     }
 
