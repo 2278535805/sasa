@@ -92,8 +92,8 @@ impl Default for OhosSettings {
             buffer_size: None,
             sample_rate: None,
             channels: 2,
-            latency_mode: OhosLatencyMode::Fast,
-            usage: OhosUsage::Game,
+            latency_mode: OhosLatencyMode::Normal,
+            usage: OhosUsage::Music,
         }
     }
 }
