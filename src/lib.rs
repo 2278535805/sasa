@@ -1,7 +1,7 @@
 /// Simple And Stupid Audio for Rust, optimized for low latency.
 pub mod backend;
 use atomic_float::AtomicF64;
-pub use backend::{Backend, RecorderBackend};
+pub use backend::{Backend, BackendStreamInfo, RecorderBackend};
 
 mod clip;
 pub use clip::AudioClip;
@@ -155,6 +155,10 @@ impl AudioManager {
         self.latency.load(Ordering::SeqCst)
     }
 
+    pub fn stream_info(&mut self) -> BackendStreamInfo {
+        self.backend.stream_info()
+    }
+
     #[inline(always)]
     pub fn consume_broken(&self) -> bool {
         self.backend.consume_broken()
@@ -221,6 +225,10 @@ impl AudioRecorder {
 
     pub fn estimate_latency(&self) -> f64 {
         self.latency.load(Ordering::SeqCst)
+    }
+
+    pub fn stream_info(&mut self) -> BackendStreamInfo {
+        self.backend.stream_info()
     }
 
     #[inline(always)]

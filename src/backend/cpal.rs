@@ -5,15 +5,34 @@ use cpal::{
     BufferSize, InputCallbackInfo, OutputCallbackInfo, Stream, StreamError,
 };
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
     Arc,
 };
 
-use super::{BackendSetup, RecorderBackendSetup, RecorderStateCell, StateCell};
+use super::{BackendSetup, BackendStreamInfo, RecorderBackendSetup, RecorderStateCell, StateCell};
 
 #[derive(Debug, Clone, Default)]
 pub struct CpalSettings {
     pub buffer_size: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CpalStreamInfo {
+    pub settings: CpalSettings,
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u16>,
+    pub device_name: Option<String>,
+    pub actual_frames_per_callback: Option<u32>,
+}
+
+impl std::fmt::Display for CpalStreamInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "settings.buffer_size: {:?}", self.settings.buffer_size)?;
+        writeln!(f, "sample_rate: {:?}", self.sample_rate)?;
+        writeln!(f, "channels: {:?}", self.channels)?;
+        writeln!(f, "device_name: {:?}", self.device_name)?;
+        writeln!(f, "actual_frames_per_callback: {:?}", self.actual_frames_per_callback)
+    }
 }
 
 pub struct CpalBackend {
@@ -21,6 +40,10 @@ pub struct CpalBackend {
     stream: Option<Stream>,
     broken: Arc<AtomicBool>,
     state: Option<Arc<StateCell>>,
+    sample_rate: Option<u32>,
+    channels: Option<u16>,
+    device_name: Option<String>,
+    actual_frames: Arc<AtomicU32>,
 }
 
 impl CpalBackend {
@@ -30,6 +53,10 @@ impl CpalBackend {
             stream: None,
             broken: Arc::default(),
             state: None,
+            sample_rate: None,
+            channels: None,
+            device_name: None,
+            actual_frames: Arc::default(),
         }
     }
 }
@@ -49,16 +76,21 @@ impl Backend for CpalBackend {
                 return Ok(());
             },
         };
-        let mut config = device
+        let device_name = device.name().ok().unwrap_or_default();
+        let config = device
             .default_output_config()
             .context("cannot get output config")?
             .config();
-        config.buffer_size = self
+        let channels = config.channels;
+        let sample_rate = config.sample_rate.0;
+        let mut config_with_buffer = config.clone();
+        config_with_buffer.buffer_size = self
             .settings
             .buffer_size
             .map_or(BufferSize::Default, |it| BufferSize::Fixed(it));
 
         let broken = Arc::clone(&self.broken);
+        let actual_frames = Arc::clone(&self.actual_frames);
         let error_callback = move |err| {
             eprintln!("audio error: {err:?}");
             if matches!(err, StreamError::DeviceNotAvailable) {
@@ -66,13 +98,14 @@ impl Backend for CpalBackend {
             }
         };
         let state = Arc::clone(self.state.as_ref().unwrap());
-        state.get().0.sample_rate = config.sample_rate.0;
-        let stream = (if config.channels == 1 {
+        state.get().0.sample_rate = sample_rate;
+        let stream = (if channels == 1 {
             device.build_output_stream(
-                &config,
+                &config_with_buffer,
                 move |data: &mut [f32], info: &OutputCallbackInfo| {
                     let (mixer, rec) = state.get();
                     mixer.render_mono(data);
+                    actual_frames.store(data.len() as u32, Ordering::Relaxed);
                     let ts = info.timestamp();
                     if let Some(delay) = ts.playback.duration_since(&ts.callback) {
                         rec.push(delay.as_secs_f64());
@@ -83,10 +116,11 @@ impl Backend for CpalBackend {
             )
         } else {
             device.build_output_stream(
-                &config,
+                &config_with_buffer,
                 move |data: &mut [f32], info: &OutputCallbackInfo| {
                     let (mixer, rec) = state.get();
                     mixer.render_stereo(data);
+                    actual_frames.store((data.len() / 2) as u32, Ordering::Relaxed);
                     let ts = info.timestamp();
                     if let Some(delay) = ts.playback.duration_since(&ts.callback) {
                         rec.push(delay.as_secs_f64());
@@ -98,6 +132,9 @@ impl Backend for CpalBackend {
         })
         .context("failed to build stream")?;
         stream.play()?;
+        self.sample_rate = Some(sample_rate);
+        self.channels = Some(channels);
+        self.device_name = Some(device_name);
         self.stream = Some(stream);
         Ok(())
     }
@@ -109,6 +146,17 @@ impl Backend for CpalBackend {
 
     fn consume_broken(&self) -> bool {
         self.broken.fetch_and(false, Ordering::Relaxed)
+    }
+
+    fn stream_info(&mut self) -> BackendStreamInfo {
+        let frames = self.actual_frames.load(Ordering::Relaxed);
+        BackendStreamInfo::Cpal(CpalStreamInfo {
+            settings: self.settings.clone(),
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            device_name: self.device_name.clone(),
+            actual_frames_per_callback: if frames > 0 { Some(frames) } else { None },
+        })
     }
 }
 
@@ -123,6 +171,10 @@ pub struct CpalRecorderBackend {
     stream: Option<Stream>,
     broken: Arc<AtomicBool>,
     state: Option<Arc<RecorderStateCell>>,
+    sample_rate: Option<u32>,
+    channels: Option<u16>,
+    device_name: Option<String>,
+    actual_frames: Arc<AtomicU32>,
 }
 
 impl CpalRecorderBackend {
@@ -132,6 +184,10 @@ impl CpalRecorderBackend {
             stream: None,
             broken: Arc::default(),
             state: None,
+            sample_rate: None,
+            channels: None,
+            device_name: None,
+            actual_frames: Arc::default(),
         }
     }
 }
@@ -151,16 +207,21 @@ impl RecorderBackend for CpalRecorderBackend {
                 return Ok(());
             }
         };
-        let mut config = device
+        let device_name = device.name().ok().unwrap_or_default();
+        let config = device
             .default_input_config()
             .context("cannot get input config")?
             .config();
-        config.buffer_size = self
+        let channels = config.channels;
+        let sample_rate = config.sample_rate.0;
+        let mut config_with_buffer = config.clone();
+        config_with_buffer.buffer_size = self
             .settings
             .buffer_size
             .map_or(BufferSize::Default, |it| BufferSize::Fixed(it));
 
         let broken = Arc::clone(&self.broken);
+        let actual_frames = Arc::clone(&self.actual_frames);
         let error_callback = move |err| {
             eprintln!("audio input error: {err:?}");
             if matches!(err, StreamError::DeviceNotAvailable) {
@@ -168,13 +229,14 @@ impl RecorderBackend for CpalRecorderBackend {
             }
         };
         let state = Arc::clone(self.state.as_ref().unwrap());
-        state.get().0.sample_rate = config.sample_rate.0;
-        let stream = (if config.channels == 1 {
+        state.get().0.sample_rate = sample_rate;
+        let stream = (if channels == 1 {
             device.build_input_stream(
-                &config,
+                &config_with_buffer,
                 move |data: &[f32], info: &InputCallbackInfo| {
                     let (mixer, rec) = state.get();
                     mixer.record_mono(data);
+                    actual_frames.store(data.len() as u32, Ordering::Relaxed);
                     let ts = info.timestamp();
                     if let Some(delay) = ts.capture.duration_since(&ts.callback) {
                         rec.push(delay.as_secs_f64());
@@ -185,10 +247,11 @@ impl RecorderBackend for CpalRecorderBackend {
             )
         } else {
             device.build_input_stream(
-                &config,
+                &config_with_buffer,
                 move |data: &[f32], info: &InputCallbackInfo| {
                     let (mixer, rec) = state.get();
                     mixer.record_stereo(data);
+                    actual_frames.store((data.len() / 2) as u32, Ordering::Relaxed);
                     let ts = info.timestamp();
                     if let Some(delay) = ts.capture.duration_since(&ts.callback) {
                         rec.push(delay.as_secs_f64());
@@ -200,6 +263,9 @@ impl RecorderBackend for CpalRecorderBackend {
         })
         .context("failed to build input stream")?;
         stream.play()?;
+        self.sample_rate = Some(sample_rate);
+        self.channels = Some(channels);
+        self.device_name = Some(device_name);
         self.stream = Some(stream);
         Ok(())
     }
@@ -211,6 +277,17 @@ impl RecorderBackend for CpalRecorderBackend {
 
     fn consume_broken(&self) -> bool {
         self.broken.fetch_and(false, Ordering::Relaxed)
+    }
+
+    fn stream_info(&mut self) -> BackendStreamInfo {
+        let frames = self.actual_frames.load(Ordering::Relaxed);
+        BackendStreamInfo::Cpal(CpalStreamInfo {
+            settings: self.settings.clone(),
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            device_name: self.device_name.clone(),
+            actual_frames_per_callback: if frames > 0 { Some(frames) } else { None },
+        })
     }
 }
 

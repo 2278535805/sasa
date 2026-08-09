@@ -15,6 +15,29 @@ use crate::{
 use anyhow::Result;
 use ringbuf::HeapConsumer;
 
+#[derive(Debug)]
+pub enum BackendStreamInfo {
+    #[cfg(feature = "oboe")]
+    Oboe(oboe::OboeStreamInfo),
+    #[cfg(feature = "cpal")]
+    Cpal(cpal::CpalStreamInfo),
+    #[cfg(feature = "ohos")]
+    Ohos(ohos::OhosStreamInfo),
+}
+
+impl std::fmt::Display for BackendStreamInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            #[cfg(feature = "oboe")]
+            BackendStreamInfo::Oboe(info) => write!(f, "{info}"),
+            #[cfg(feature = "cpal")]
+            BackendStreamInfo::Cpal(info) => write!(f, "{info}"),
+            #[cfg(feature = "ohos")]
+            BackendStreamInfo::Ohos(info) => write!(f, "{info}"),
+        }
+    }
+}
+
 pub struct BackendSetup {
     pub(crate) mixer_cons: HeapConsumer<RenderMixerCommand>,
     pub(crate) latency_rec: LatencyRecorder,
@@ -25,6 +48,7 @@ pub trait Backend {
     fn start(&mut self) -> Result<()>;
     fn close(&mut self) -> Result<()>;
     fn consume_broken(&self) -> bool;
+    fn stream_info(&mut self) -> BackendStreamInfo;
 }
 
 #[repr(transparent)]
@@ -59,6 +83,7 @@ pub trait RecorderBackend {
     fn start(&mut self) -> Result<()>;
     fn close(&mut self) -> Result<()>;
     fn consume_broken(&self) -> bool;
+    fn stream_info(&mut self) -> BackendStreamInfo;
 }
 
 #[repr(transparent)]
