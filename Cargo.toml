@@ -17,7 +17,7 @@ ringbuf = "0.3.3"
 symphonia = { version = "0.5.2", features = ["mp3", "aac"] }
 thiserror = "2.0.16"
 
-oboe = { version = "0.6.1", optional = true, features = ["shared-stdcxx"] }
+oboe = { git = "https://github.com/2278535805/oboe-rs", optional = true, features = ["shared-stdcxx"] }
 ohos-audio-sys = { version = "0.0.1", optional = true, features = ["api-20"] }
 atomic_float = "1.1.0"
 

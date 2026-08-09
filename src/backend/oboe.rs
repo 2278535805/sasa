@@ -18,6 +18,7 @@ pub struct OboeSettings {
     pub audio_api: AudioApi,
     pub sharing_mode: SharingMode,
     pub usage: Usage,
+    pub mmap: bool,
 }
 impl Default for OboeSettings {
     fn default() -> Self {
@@ -27,6 +28,7 @@ impl Default for OboeSettings {
             audio_api: AudioApi::Unspecified,
             sharing_mode: SharingMode::Shared,
             usage: Usage::Media,
+            mmap: true,
         }
     }
 }
@@ -56,6 +58,7 @@ impl Backend for OboeBackend {
     }
 
     fn start(&mut self) -> Result<()> {
+        oboe::set_mmap_enabled(self.settings.mmap);
         let mut stream = AudioStreamBuilder::default()
             .set_usage(self.settings.usage)
             .set_audio_api(self.settings.audio_api)
@@ -180,6 +183,7 @@ impl RecorderBackend for OboeRecorderBackend {
     }
 
     fn start(&mut self) -> Result<()> {
+        oboe::set_mmap_enabled(self.settings.mmap);
         let mut stream = AudioStreamBuilder::default()
             .set_input()
             .set_usage(self.settings.usage)
