@@ -15,7 +15,7 @@ use crate::{
 use anyhow::Result;
 use ringbuf::HeapConsumer;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BackendStreamInfo {
     #[cfg(feature = "oboe")]
     Oboe(oboe::OboeStreamInfo),
