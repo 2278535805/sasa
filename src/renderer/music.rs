@@ -101,12 +101,32 @@ impl MusicRenderer {
                             state.paused.store(false, Ordering::SeqCst);
                         }
                     }
-                    self.fade_time = (time * sample_rate as f64).round() as _;
-                    self.fade_current = 0;
+                    let new_fade_time = (time * sample_rate as f64).round() as i32;
+                    if self.fade_time != 0 {
+                        let vol = if self.fade_time > 0 {
+                            self.fade_current as f64 / self.fade_time as f64
+                        } else {
+                            1.0 - self.fade_current as f64 / self.fade_time as f64
+                        };
+                        self.fade_current = (vol * new_fade_time as f64).round() as _;
+                    } else {
+                        self.fade_current = 0;
+                    }
+                    self.fade_time = new_fade_time;
                 }
                 MusicCommand::FadeOut(time) => {
-                    self.fade_time = (-time * sample_rate as f64).round() as _;
-                    self.fade_current = 0;
+                    let new_fade_time = (-time * sample_rate as f64).round() as i32;
+                    if self.fade_time != 0 {
+                        let vol = if self.fade_time > 0 {
+                            self.fade_current as f64 / self.fade_time as f64
+                        } else {
+                            1.0 - self.fade_current as f64 / self.fade_time as f64
+                        };
+                        self.fade_current = ((1.0 - vol) * new_fade_time as f64).round() as _;
+                    } else {
+                        self.fade_current = 0;
+                    }
+                    self.fade_time = new_fade_time;
                 }
             }
         }
