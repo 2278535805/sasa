@@ -182,6 +182,15 @@ impl Backend for OhosBackend {
         }
     }
 
+    fn close(&mut self) -> Result<()> {
+        if let Some(renderer) = self.stream.take() {
+            unsafe {
+                OH_AudioRenderer_Release(renderer);
+            }
+        }
+        Ok(())
+    }
+
     fn consume_broken(&self) -> bool {
         self.broken.fetch_and(false, Ordering::Relaxed)
     }
@@ -255,11 +264,7 @@ extern "C" fn audio_renderer_on_interrupt(
 
 impl Drop for OhosBackend {
     fn drop(&mut self) {
-        if let Some(renderer) = self.stream {
-            unsafe {
-                OH_AudioRenderer_Release(renderer);
-            }
-        }
+        let _ = self.close();
     }
 }
 
@@ -351,6 +356,15 @@ impl RecorderBackend for OhosRecorderBackend {
         }
     }
 
+    fn close(&mut self) -> Result<()> {
+        if let Some(capturer) = self.stream.take() {
+            unsafe {
+                OH_AudioCapturer_Release(capturer);
+            }
+        }
+        Ok(())
+    }
+
     fn consume_broken(&self) -> bool {
         self.broken.fetch_and(false, Ordering::Relaxed)
     }
@@ -423,10 +437,6 @@ extern "C" fn audio_capturer_on_interrupt(
 
 impl Drop for OhosRecorderBackend {
     fn drop(&mut self) {
-        if let Some(capturer) = self.stream {
-            unsafe {
-                OH_AudioCapturer_Release(capturer);
-            }
-        }
+        let _ = self.close();
     }
 }

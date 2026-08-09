@@ -165,6 +165,10 @@ impl AudioManager {
         self.backend.start()
     }
 
+    pub fn close(&mut self) -> Result<()> {
+        self.backend.close()
+    }
+
     pub fn recover_if_needed(&mut self) -> Result<()> {
         if self.consume_broken() {
             self.start()
@@ -227,6 +231,10 @@ impl AudioRecorder {
     #[inline(always)]
     pub fn start(&mut self) -> Result<()> {
         self.backend.start()
+    }
+
+    pub fn close(&mut self) -> Result<()> {
+        self.backend.close()
     }
 
     pub fn recover_if_needed(&mut self) -> Result<()> {

@@ -23,6 +23,7 @@ pub struct BackendSetup {
 pub trait Backend {
     fn setup(&mut self, setup: BackendSetup) -> Result<()>;
     fn start(&mut self) -> Result<()>;
+    fn close(&mut self) -> Result<()>;
     fn consume_broken(&self) -> bool;
 }
 
@@ -56,6 +57,7 @@ pub struct RecorderBackendSetup {
 pub trait RecorderBackend {
     fn setup(&mut self, setup: RecorderBackendSetup) -> Result<()>;
     fn start(&mut self) -> Result<()>;
+    fn close(&mut self) -> Result<()>;
     fn consume_broken(&self) -> bool;
 }
 

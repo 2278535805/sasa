@@ -102,8 +102,19 @@ impl Backend for CpalBackend {
         Ok(())
     }
 
+    fn close(&mut self) -> Result<()> {
+        self.stream = None;
+        Ok(())
+    }
+
     fn consume_broken(&self) -> bool {
         self.broken.fetch_and(false, Ordering::Relaxed)
+    }
+}
+
+impl Drop for CpalBackend {
+    fn drop(&mut self) {
+        let _ = self.close();
     }
 }
 
@@ -193,7 +204,18 @@ impl RecorderBackend for CpalRecorderBackend {
         Ok(())
     }
 
+    fn close(&mut self) -> Result<()> {
+        self.stream = None;
+        Ok(())
+    }
+
     fn consume_broken(&self) -> bool {
         self.broken.fetch_and(false, Ordering::Relaxed)
+    }
+}
+
+impl Drop for CpalRecorderBackend {
+    fn drop(&mut self) {
+        let _ = self.close();
     }
 }

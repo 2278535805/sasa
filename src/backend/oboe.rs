@@ -75,8 +75,21 @@ impl Backend for OboeBackend {
         Ok(())
     }
 
+    fn close(&mut self) -> Result<()> {
+        if let Some(mut stream) = self.stream.take() {
+            stream.close()?;
+        }
+        Ok(())
+    }
+
     fn consume_broken(&self) -> bool {
         self.broken.fetch_and(false, Ordering::Relaxed)
+    }
+}
+
+impl Drop for OboeBackend {
+    fn drop(&mut self) {
+        let _ = self.close();
     }
 }
 
@@ -186,8 +199,21 @@ impl RecorderBackend for OboeRecorderBackend {
         Ok(())
     }
 
+    fn close(&mut self) -> Result<()> {
+        if let Some(mut stream) = self.stream.take() {
+            stream.close()?;
+        }
+        Ok(())
+    }
+
     fn consume_broken(&self) -> bool {
         self.broken.fetch_and(false, Ordering::Relaxed)
+    }
+}
+
+impl Drop for OboeRecorderBackend {
+    fn drop(&mut self) {
+        let _ = self.close();
     }
 }
 
