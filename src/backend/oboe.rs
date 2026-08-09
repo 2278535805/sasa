@@ -251,9 +251,7 @@ impl AudioOutputCallback for OboeCallback {
         frames: &mut [(f32, f32)],
     ) -> DataCallbackResult {
         if let Some(buffer_size) = &self.buffer_size {
-            let _ = stream.set_buffer_size_in_frames(
-                (*buffer_size as i32).min(stream.get_buffer_size_in_frames()),
-            );
+            let _ = stream.set_buffer_size_in_frames(*buffer_size as i32);
         }
 
         let (mixer, rec) = self.state.get();
