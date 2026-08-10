@@ -147,7 +147,8 @@ impl std::fmt::Display for OhosStreamInfo {
         writeln!(f, "overflow_count: {:?}", self.overflow_count)?;
         writeln!(f, "frames_written: {:?}", self.frames_written)?;
         writeln!(f, "frames_read: {:?}", self.frames_read)?;
-        writeln!(f, "stream_state: {:?}", self.stream_state)
+        writeln!(f, "stream_state: {:?}", self.stream_state)?;
+        Ok(())
     }
 }
 

@@ -101,7 +101,8 @@ impl std::fmt::Display for OboeStreamInfo {
         writeln!(f, "latency_millis: {:?}", self.latency_millis)?;
         writeln!(f, "mmap_used: {:?}", self.mmap_used)?;
         writeln!(f, "actual_audio_api: {:?}", self.actual_audio_api)?;
-        writeln!(f, "available_frames: {:?}", self.available_frames)
+        writeln!(f, "available_frames: {:?}", self.available_frames)?;
+        Ok(())
     }
 }
 

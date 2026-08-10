@@ -31,7 +31,8 @@ impl std::fmt::Display for CpalStreamInfo {
         writeln!(f, "sample_rate: {:?}", self.sample_rate)?;
         writeln!(f, "channels: {:?}", self.channels)?;
         writeln!(f, "device_name: {:?}", self.device_name)?;
-        writeln!(f, "actual_frames_per_callback: {:?}", self.actual_frames_per_callback)
+        writeln!(f, "actual_frames_per_callback: {:?}", self.actual_frames_per_callback)?;
+        Ok(())
     }
 }
 

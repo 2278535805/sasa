@@ -280,7 +280,8 @@ impl std::fmt::Display for WasapiStreamInfo {
         writeln!(f, "current_padding: {:?}", self.current_padding)?;
         writeln!(f, "available_space: {:?}", self.available_space)?;
         writeln!(f, "clock_position: {:?}", self.clock_position)?;
-        writeln!(f, "clock_frequency: {:?}", self.clock_frequency)
+        writeln!(f, "clock_frequency: {:?}", self.clock_frequency)?;
+        Ok(())
     }
 }
 
