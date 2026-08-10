@@ -250,7 +250,6 @@ pub struct WasapiStreamInfo {
     pub buffer_size_frames: Option<u32>,
     pub channel_mask: Option<u32>,
     pub adapter_name: Option<String>,
-    pub device_format: Option<String>,
     pub current_padding: Option<u32>,
     pub available_space: Option<u32>,
     pub clock_position: Option<u64>,
@@ -276,7 +275,6 @@ impl std::fmt::Display for WasapiStreamInfo {
         writeln!(f, "buffer_size_frames: {:?}", self.buffer_size_frames)?;
         writeln!(f, "channel_mask: 0x{:08X}", self.channel_mask.unwrap_or(0))?;
         writeln!(f, "adapter_name: {:?}", self.adapter_name)?;
-        writeln!(f, "device_format: {:?}", self.device_format)?;
         writeln!(f, "current_padding: {:?}", self.current_padding)?;
         writeln!(f, "available_space: {:?}", self.available_space)?;
         writeln!(f, "clock_position: {:?}", self.clock_position)?;
@@ -308,7 +306,6 @@ pub struct WasapiBackend {
     clock_position: Arc<AtomicU64>,
     clock_frequency: Arc<AtomicU64>,
     adapter_name: Arc<Mutex<Option<String>>>,
-    device_format: Arc<Mutex<Option<String>>>,
 }
 impl WasapiBackend {
     pub fn new(settings: WasapiSettings) -> Self {
@@ -335,7 +332,6 @@ impl WasapiBackend {
             clock_position: Arc::default(),
             clock_frequency: Arc::default(),
             adapter_name: Arc::default(),
-            device_format: Arc::default(),
         }
     }
 
@@ -361,7 +357,6 @@ impl WasapiBackend {
         clock_position: Arc<AtomicU64>,
         clock_frequency: Arc<AtomicU64>,
         adapter_name: Arc<Mutex<Option<String>>>,
-        device_format: Arc<Mutex<Option<String>>>,
     ) -> Result<()> {
         let _ = initialize_mta().ok();
 
@@ -372,10 +367,6 @@ impl WasapiBackend {
         let dev_name = device.get_friendlyname().ok();
         *device_name.lock().unwrap() = dev_name;
         *adapter_name.lock().unwrap() = device.get_interface_friendlyname().ok();
-        *device_format.lock().unwrap() = device
-            .get_device_format()
-            .ok()
-            .map(|f| format!("{f:?}"));
 
         let mix_format = if settings.sample_rate.is_none() || settings.channels.is_none() {
             let client = device
@@ -586,7 +577,6 @@ impl Backend for WasapiBackend {
         let clock_position = Arc::clone(&self.clock_position);
         let clock_frequency = Arc::clone(&self.clock_frequency);
         let adapter_name = Arc::clone(&self.adapter_name);
-        let device_format = Arc::clone(&self.device_format);
 
         running.store(true, Ordering::Relaxed);
 
@@ -615,7 +605,6 @@ impl Backend for WasapiBackend {
                     clock_position,
                     clock_frequency,
                     adapter_name,
-                    device_format,
                 ).is_err() {
                     handle_broken.store(true, Ordering::Relaxed);
                 };
@@ -682,7 +671,6 @@ impl Backend for WasapiBackend {
                 if v > 0 { Some(v) } else { None }
             },
             adapter_name: self.adapter_name.lock().unwrap().clone(),
-            device_format: self.device_format.lock().unwrap().clone(),
             current_padding: {
                 let v = self.current_padding.load(Ordering::Relaxed);
                 Some(v)
@@ -732,7 +720,6 @@ pub struct WasapiRecorderBackend {
     clock_position: Arc<AtomicU64>,
     clock_frequency: Arc<AtomicU64>,
     adapter_name: Arc<Mutex<Option<String>>>,
-    device_format: Arc<Mutex<Option<String>>>,
 }
 
 impl WasapiRecorderBackend {
@@ -760,7 +747,6 @@ impl WasapiRecorderBackend {
             clock_position: Arc::default(),
             clock_frequency: Arc::default(),
             adapter_name: Arc::default(),
-            device_format: Arc::default(),
         }
     }
 
@@ -786,7 +772,6 @@ impl WasapiRecorderBackend {
         clock_position: Arc<AtomicU64>,
         clock_frequency: Arc<AtomicU64>,
         adapter_name: Arc<Mutex<Option<String>>>,
-        device_format: Arc<Mutex<Option<String>>>,
     ) -> Result<()> {
         let _ = initialize_mta().ok();
 
@@ -797,10 +782,6 @@ impl WasapiRecorderBackend {
         let dev_name = device.get_friendlyname().ok();
         *device_name.lock().unwrap() = dev_name;
         *adapter_name.lock().unwrap() = device.get_interface_friendlyname().ok();
-        *device_format.lock().unwrap() = device
-            .get_device_format()
-            .ok()
-            .map(|f| format!("{f:?}"));
 
         let mix_format = if settings.sample_rate.is_none() || settings.channels.is_none() {
             let client = device
@@ -1000,7 +981,6 @@ impl RecorderBackend for WasapiRecorderBackend {
         let clock_position = Arc::clone(&self.clock_position);
         let clock_frequency = Arc::clone(&self.clock_frequency);
         let adapter_name = Arc::clone(&self.adapter_name);
-        let device_format = Arc::clone(&self.device_format);
 
         running.store(true, Ordering::Relaxed);
 
@@ -1029,7 +1009,6 @@ impl RecorderBackend for WasapiRecorderBackend {
                     clock_position,
                     clock_frequency,
                     adapter_name,
-                    device_format,
                 ).is_err() {
                     handle_broken.store(true, Ordering::Relaxed);
                 }
@@ -1096,7 +1075,6 @@ impl RecorderBackend for WasapiRecorderBackend {
                 if v > 0 { Some(v) } else { None }
             },
             adapter_name: self.adapter_name.lock().unwrap().clone(),
-            device_format: self.device_format.lock().unwrap().clone(),
             current_padding: {
                 let v = self.current_padding.load(Ordering::Relaxed);
                 Some(v)
