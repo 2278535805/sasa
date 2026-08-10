@@ -127,7 +127,7 @@ fn probe_exclusive_format(
     let sample_rates: Vec<usize> = if let Some(sr) = sample_rate {
         vec![sr as usize]
     } else {
-        vec![384000, 192000, 96000, 48000, 44100, 24000, 22050, 16000, 12000, 11025, 8000]
+        vec![192000, 96000, 48000, 44100, 24000, 22050, 16000, 12000, 11025, 8000]
     };
 
     let format_candidates: [(usize, usize, SampleType, SampleConversion); 4] = [
