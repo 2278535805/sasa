@@ -216,7 +216,7 @@ pub struct WasapiSettings {
     pub buffer_size: Option<u32>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u16>,
-    pub exclusive: bool,
+    pub share_mode: ShareMode,
     pub stream_category: StreamCategory,
     pub raw_stream: bool,
 }
@@ -227,7 +227,7 @@ impl Default for WasapiSettings {
             buffer_size: None,
             sample_rate: None,
             channels: None,
-            exclusive: false,
+            share_mode: ShareMode::Shared,
             stream_category: StreamCategory::Media,
             raw_stream: false,
         }
@@ -240,7 +240,6 @@ pub struct WasapiStreamInfo {
     pub sample_rate: Option<u32>,
     pub channels: Option<u16>,
     pub device_name: Option<String>,
-    pub share_mode: Option<ShareMode>,
     pub actual_frames_per_callback: Option<u32>,
     pub default_period_hns: Option<u32>,
     pub min_period_hns: Option<u32>,
@@ -254,11 +253,10 @@ impl std::fmt::Display for WasapiStreamInfo {
         writeln!(f, "settings.buffer_size: {:?}", self.settings.buffer_size)?;
         writeln!(f, "settings.sample_rate: {:?}", self.settings.sample_rate)?;
         writeln!(f, "settings.channels: {:?}", self.settings.channels)?;
-        writeln!(f, "settings.exclusive: {:?}", self.settings.exclusive)?;
+        writeln!(f, "settings.exclusive: {:?}", self.settings.share_mode)?;
         writeln!(f, "sample_rate: {:?}", self.sample_rate)?;
         writeln!(f, "channels: {:?}", self.channels)?;
         writeln!(f, "device_name: {:?}", self.device_name)?;
-        writeln!(f, "share_mode: {:?}", self.share_mode)?;
         writeln!(f, "actual_frames_per_callback: {:?}", self.actual_frames_per_callback)?;
         writeln!(f, "default_period_hns: {:?}", self.default_period_hns)?;
         writeln!(f, "min_period_hns: {:?}", self.min_period_hns)?;
@@ -278,7 +276,6 @@ pub struct WasapiBackend {
     channels: Arc<AtomicU32>,
     actual_frames: Arc<AtomicU32>,
     device_name: Arc<Mutex<Option<String>>>,
-    share_mode: Arc<Mutex<Option<ShareMode>>>,
     default_period_hns: Arc<AtomicU32>,
     min_period_hns: Arc<AtomicU32>,
     actual_bits: Arc<AtomicU32>,
@@ -298,7 +295,6 @@ impl WasapiBackend {
             channels: Arc::default(),
             actual_frames: Arc::default(),
             device_name: Arc::default(),
-            share_mode: Arc::default(),
             default_period_hns: Arc::default(),
             min_period_hns: Arc::default(),
             actual_bits: Arc::default(),
@@ -316,7 +312,6 @@ impl WasapiBackend {
         sample_rate: Arc<AtomicU32>,
         channels: Arc<AtomicU32>,
         device_name: Arc<Mutex<Option<String>>>,
-        share_mode: Arc<Mutex<Option<ShareMode>>>,
         default_period_hns: Arc<AtomicU32>,
         min_period_hns: Arc<AtomicU32>,
         actual_bits: Arc<AtomicU32>,
@@ -354,7 +349,7 @@ impl WasapiBackend {
         let desired_format =
             WaveFormat::new(32, 32, &SampleType::Float, desired_sr, desired_ch, None);
 
-        let (audio_client, actual_format, conversion, mode) = if settings.exclusive {
+        let (audio_client, actual_format, conversion, mode) = if matches!(settings.share_mode, ShareMode::Exclusive) {
             probe_exclusive_format(
                 &device,
                 settings.sample_rate,
@@ -415,11 +410,6 @@ impl WasapiBackend {
         sample_rate.store(actual_sr, Ordering::Relaxed);
         channels.store(actual_ch_u32, Ordering::Relaxed);
         state.get().0.sample_rate = actual_sr;
-        *share_mode.lock().unwrap() = if settings.exclusive {
-            Some(ShareMode::Exclusive)
-        } else {
-            Some(ShareMode::Shared)
-        };
 
         let h_event = audio_client
             .set_get_eventhandle()
@@ -516,7 +506,6 @@ impl Backend for WasapiBackend {
         let sample_rate = Arc::clone(&self.sample_rate);
         let channels = Arc::clone(&self.channels);
         let device_name = Arc::clone(&self.device_name);
-        let share_mode = Arc::clone(&self.share_mode);
         let default_period_hns = Arc::clone(&self.default_period_hns);
         let min_period_hns = Arc::clone(&self.min_period_hns);
         let actual_bits = Arc::clone(&self.actual_bits);
@@ -537,7 +526,6 @@ impl Backend for WasapiBackend {
                     sample_rate,
                     channels,
                     device_name,
-                    share_mode,
                     default_period_hns,
                     min_period_hns,
                     actual_bits,
@@ -578,7 +566,6 @@ impl Backend for WasapiBackend {
                 if ch > 0 { Some(ch as u16) } else { None }
             },
             device_name: self.device_name.lock().unwrap().clone(),
-            share_mode: *self.share_mode.lock().unwrap(),
             actual_frames_per_callback: if frames > 0 { Some(frames) } else { None },
             default_period_hns: {
                 let v = self.default_period_hns.load(Ordering::Relaxed);
@@ -617,7 +604,6 @@ pub struct WasapiRecorderBackend {
     channels: Arc<AtomicU32>,
     actual_frames: Arc<AtomicU32>,
     device_name: Arc<Mutex<Option<String>>>,
-    share_mode: Arc<Mutex<Option<ShareMode>>>,
     default_period_hns: Arc<AtomicU32>,
     min_period_hns: Arc<AtomicU32>,
     actual_bits: Arc<AtomicU32>,
@@ -637,7 +623,6 @@ impl WasapiRecorderBackend {
             channels: Arc::default(),
             actual_frames: Arc::default(),
             device_name: Arc::default(),
-            share_mode: Arc::default(),
             default_period_hns: Arc::default(),
             min_period_hns: Arc::default(),
             actual_bits: Arc::default(),
@@ -655,7 +640,6 @@ impl WasapiRecorderBackend {
         sample_rate: Arc<AtomicU32>,
         channels: Arc<AtomicU32>,
         device_name: Arc<Mutex<Option<String>>>,
-        share_mode: Arc<Mutex<Option<ShareMode>>>,
         default_period_hns: Arc<AtomicU32>,
         min_period_hns: Arc<AtomicU32>,
         actual_bits: Arc<AtomicU32>,
@@ -691,7 +675,7 @@ impl WasapiRecorderBackend {
             mix_format.as_ref().unwrap().get_nchannels() as usize
         };
 
-        let (audio_client, actual_format, conversion, mode) = if settings.exclusive {
+        let (audio_client, actual_format, conversion, mode) = if matches!(settings.share_mode, ShareMode::Exclusive) {
             probe_exclusive_format(
                 &device,
                 settings.sample_rate,
@@ -753,11 +737,6 @@ impl WasapiRecorderBackend {
         sample_rate.store(actual_sr, Ordering::Relaxed);
         channels.store(actual_ch as u32, Ordering::Relaxed);
         state.get().0.sample_rate = actual_sr;
-        *share_mode.lock().unwrap() = if settings.exclusive {
-            Some(ShareMode::Exclusive)
-        } else {
-            Some(ShareMode::Shared)
-        };
 
         let h_event = audio_client
             .set_get_eventhandle()
@@ -844,7 +823,6 @@ impl RecorderBackend for WasapiRecorderBackend {
         let sample_rate = Arc::clone(&self.sample_rate);
         let channels = Arc::clone(&self.channels);
         let device_name = Arc::clone(&self.device_name);
-        let share_mode = Arc::clone(&self.share_mode);
         let default_period_hns = Arc::clone(&self.default_period_hns);
         let min_period_hns = Arc::clone(&self.min_period_hns);
         let actual_bits = Arc::clone(&self.actual_bits);
@@ -865,7 +843,6 @@ impl RecorderBackend for WasapiRecorderBackend {
                     sample_rate,
                     channels,
                     device_name,
-                    share_mode,
                     default_period_hns,
                     min_period_hns,
                     actual_bits,
@@ -906,7 +883,6 @@ impl RecorderBackend for WasapiRecorderBackend {
                 if ch > 0 { Some(ch as u16) } else { None }
             },
             device_name: self.device_name.lock().unwrap().clone(),
-            share_mode: *self.share_mode.lock().unwrap(),
             actual_frames_per_callback: if frames > 0 { Some(frames) } else { None },
             default_period_hns: {
                 let v = self.default_period_hns.load(Ordering::Relaxed);
