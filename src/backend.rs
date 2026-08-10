@@ -7,6 +7,9 @@ pub mod oboe;
 #[cfg(feature = "ohos")]
 pub mod ohos;
 
+#[cfg(feature = "wasapi")]
+pub mod wasapi;
+
 use crate::{
     mixer::{RecorderMixer, RecorderMixerCommand},
     mixer::{Mixer, RenderMixerCommand},
@@ -23,6 +26,8 @@ pub enum BackendStreamInfo {
     Cpal(cpal::CpalStreamInfo),
     #[cfg(feature = "ohos")]
     Ohos(ohos::OhosStreamInfo),
+    #[cfg(feature = "wasapi")]
+    Wasapi(wasapi::WasapiStreamInfo),
 }
 
 impl std::fmt::Display for BackendStreamInfo {
@@ -34,6 +39,8 @@ impl std::fmt::Display for BackendStreamInfo {
             BackendStreamInfo::Cpal(info) => write!(f, "{info}"),
             #[cfg(feature = "ohos")]
             BackendStreamInfo::Ohos(info) => write!(f, "{info}"),
+            #[cfg(feature = "wasapi")]
+            BackendStreamInfo::Wasapi(info) => write!(f, "{info}"),
         }
     }
 }

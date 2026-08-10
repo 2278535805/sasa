@@ -8,6 +8,7 @@ default = ["cpal"]
 cpal = ["dep:cpal"]
 oboe = ["dep:oboe"]
 ohos = ["dep:ohos-audio-sys"]
+wasapi = ["dep:wasapi"]
 
 [dependencies]
 anyhow = "1.0.68"
@@ -19,6 +20,7 @@ thiserror = "2.0.16"
 
 oboe = { git = "https://github.com/2278535805/oboe-rs", optional = true, features = ["shared-stdcxx"] }
 ohos-audio-sys = { version = "0.0.1", optional = true, features = ["api-20"] }
+wasapi = { version = "0.23.0", optional = true }
 atomic_float = "1.1.0"
 
 [dev-dependencies]
