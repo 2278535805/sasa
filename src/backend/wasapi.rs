@@ -7,14 +7,209 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-pub use wasapi::ShareMode;
+pub use wasapi::{ShareMode, StreamCategory};
 use wasapi::{
-    calculate_period_100ns, initialize_mta, DeviceEnumerator,
-    Direction, SampleType, StreamMode, WaveFormat,
+    calculate_period_100ns, initialize_mta, AudioClient, AudioClientProperties, Device,
+    DeviceEnumerator, Direction, SampleType, StreamMode, StreamOption, WaveFormat,
 };
 
 use super::{BackendSetup, BackendStreamInfo, RecorderBackendSetup, RecorderStateCell, StateCell};
 use crate::{Backend, RecorderBackend};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SampleConversion {
+    Float32,
+    Int32,
+    Int24,
+    Int16,
+}
+
+impl SampleConversion {
+    fn bytes_per_sample(self) -> usize {
+        match self {
+            SampleConversion::Float32 | SampleConversion::Int32 => 4,
+            SampleConversion::Int24 => 3,
+            SampleConversion::Int16 => 2,
+        }
+    }
+
+    fn f32_to_bytes(self, src: &[f32], dst: &mut [u8]) {
+        match self {
+            SampleConversion::Float32 => {
+                for (i, s) in src.iter().enumerate() {
+                    dst[i * 4..(i + 1) * 4].copy_from_slice(&s.to_le_bytes());
+                }
+            }
+            SampleConversion::Int32 => {
+                for (i, s) in src.iter().enumerate() {
+                    let clamped = s.clamp(-1.0, 1.0);
+                    let sample = (clamped * 2147483647.0) as i32;
+                    dst[i * 4..(i + 1) * 4].copy_from_slice(&sample.to_le_bytes());
+                }
+            }
+            SampleConversion::Int24 => {
+                for (i, s) in src.iter().enumerate() {
+                    let clamped = s.clamp(-1.0, 1.0);
+                    let sample = (clamped * 8388607.0) as i32;
+                    let bytes = sample.to_le_bytes();
+                    dst[i * 3..(i + 1) * 3].copy_from_slice(&bytes[..3]);
+                }
+            }
+            SampleConversion::Int16 => {
+                for (i, s) in src.iter().enumerate() {
+                    let clamped = s.clamp(-1.0, 1.0);
+                    let sample = (clamped * 32767.0) as i16;
+                    dst[i * 2..(i + 1) * 2].copy_from_slice(&sample.to_le_bytes());
+                }
+            }
+        }
+    }
+
+    fn bytes_to_f32(self, src: &[u8], dst: &mut [f32]) {
+        match self {
+            SampleConversion::Float32 => {
+                let ptr = src.as_ptr() as *const f32;
+                let f32_slice =
+                    unsafe { std::slice::from_raw_parts(ptr, dst.len().min(src.len() / 4)) };
+                dst[..f32_slice.len()].copy_from_slice(f32_slice);
+            }
+            SampleConversion::Int32 => {
+                let count = dst.len().min(src.len() / 4);
+                for i in 0..count {
+                    let mut bytes = [0u8; 4];
+                    bytes.copy_from_slice(&src[i * 4..(i + 1) * 4]);
+                    let sample = i32::from_le_bytes(bytes);
+                    dst[i] = sample as f32 / 2147483648.0;
+                }
+            }
+            SampleConversion::Int24 => {
+                let count = dst.len().min(src.len() / 3);
+                for i in 0..count {
+                    let mut bytes = [0u8; 4];
+                    bytes[..3].copy_from_slice(&src[i * 3..(i + 1) * 3]);
+                    if bytes[2] & 0x80 != 0 {
+                        bytes[3] = 0xff;
+                    }
+                    let sample = i32::from_le_bytes(bytes);
+                    dst[i] = sample as f32 / 8388608.0;
+                }
+            }
+            SampleConversion::Int16 => {
+                let count = dst.len().min(src.len() / 2);
+                for i in 0..count {
+                    let mut bytes = [0u8; 2];
+                    bytes.copy_from_slice(&src[i * 2..(i + 1) * 2]);
+                    let sample = i16::from_le_bytes(bytes);
+                    dst[i] = sample as f32 / 32768.0;
+                }
+            }
+        }
+    }
+}
+
+fn mode_period_hns(mode: &StreamMode) -> u32 {
+    match mode {
+        StreamMode::EventsExclusive { period_hns } => *period_hns as u32,
+        StreamMode::EventsShared { buffer_duration_hns, .. } => *buffer_duration_hns as u32,
+        StreamMode::PollingExclusive { period_hns, .. } => *period_hns as u32,
+        StreamMode::PollingShared { buffer_duration_hns, .. } => *buffer_duration_hns as u32,
+    }
+}
+
+fn probe_exclusive_format(
+    device: &Device,
+    sample_rate: Option<u32>,
+    desired_ch: usize,
+    buffer_size: Option<u32>,
+    direction: Direction,
+) -> Result<(AudioClient, WaveFormat, SampleConversion, StreamMode)> {
+    let sample_rates: Vec<usize> = if let Some(sr) = sample_rate {
+        vec![sr as usize]
+    } else {
+        vec![384000, 192000, 96000, 48000, 44100, 24000, 22050, 16000, 12000, 11025, 8000]
+    };
+
+    let format_candidates: [(usize, usize, SampleType, SampleConversion); 4] = [
+        (32, 32, SampleType::Float, SampleConversion::Float32),
+        (32, 32, SampleType::Int, SampleConversion::Int32),
+        (24, 24, SampleType::Int, SampleConversion::Int24),
+        (16, 16, SampleType::Int, SampleConversion::Int16),
+    ];
+
+    let mut last_err = String::new();
+    for sr in &sample_rates {
+        for (storebits, validbits, sample_type, conversion) in &format_candidates {
+            let format = WaveFormat::new(
+                *storebits,
+                *validbits,
+                sample_type,
+                *sr,
+                desired_ch,
+                None,
+            );
+
+            let mut audio_client = match device.get_iaudioclient() {
+                Ok(c) => c,
+                Err(e) => {
+                    last_err = format!("get_iaudioclient: {e}");
+                    continue;
+                }
+            };
+
+            let supported = match audio_client.is_supported_exclusive_with_quirks(&format) {
+                Ok(f) => f,
+                Err(e) => {
+                    last_err = format!(
+                        "{storebits}bit {:?} {}Hz: {e}",
+                        sample_type, sr
+                    );
+                    continue;
+                }
+            };
+
+            let (_def_period, min_period) = match audio_client.get_device_period() {
+                Ok(p) => p,
+                Err(e) => {
+                    last_err = format!("get_device_period: {e}");
+                    continue;
+                }
+            };
+
+            let period_hns = if let Some(bs) = buffer_size {
+                calculate_period_100ns(bs as i64, supported.get_samplespersec() as i64)
+            } else {
+                min_period
+            };
+
+            let desired_period = match audio_client
+                .calculate_aligned_period_near(period_hns, Some(128), &supported)
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    last_err = format!("calculate_aligned_period_near: {e}");
+                    continue;
+                }
+            };
+
+            let mode = StreamMode::EventsExclusive {
+                period_hns: desired_period,
+            };
+
+            match audio_client.initialize_client(&supported, &direction, &mode) {
+                Ok(()) => return Ok((audio_client, supported, *conversion, mode)),
+                Err(e) => {
+                    last_err = format!(
+                        "{storebits}bit {:?} {}Hz init: {e}",
+                        sample_type, sr
+                    );
+                }
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "no exclusive format found for {desired_ch}ch. last: {last_err}",
+    ))
+}
 
 #[derive(Debug, Clone)]
 pub struct WasapiSettings {
@@ -22,6 +217,8 @@ pub struct WasapiSettings {
     pub sample_rate: Option<u32>,
     pub channels: Option<u16>,
     pub exclusive: bool,
+    pub stream_category: StreamCategory,
+    pub raw_stream: bool,
 }
 
 impl Default for WasapiSettings {
@@ -31,6 +228,8 @@ impl Default for WasapiSettings {
             sample_rate: None,
             channels: None,
             exclusive: false,
+            stream_category: StreamCategory::Media,
+            raw_stream: false,
         }
     }
 }
@@ -43,6 +242,11 @@ pub struct WasapiStreamInfo {
     pub device_name: Option<String>,
     pub share_mode: Option<ShareMode>,
     pub actual_frames_per_callback: Option<u32>,
+    pub default_period_hns: Option<u32>,
+    pub min_period_hns: Option<u32>,
+    pub actual_bits_per_sample: Option<u16>,
+    pub actual_sample_type: Option<String>,
+    pub actual_period_hns: Option<u32>,
 }
 
 impl std::fmt::Display for WasapiStreamInfo {
@@ -55,7 +259,12 @@ impl std::fmt::Display for WasapiStreamInfo {
         writeln!(f, "channels: {:?}", self.channels)?;
         writeln!(f, "device_name: {:?}", self.device_name)?;
         writeln!(f, "share_mode: {:?}", self.share_mode)?;
-        writeln!(f,"actual_frames_per_callback: {:?}", self.actual_frames_per_callback)
+        writeln!(f, "actual_frames_per_callback: {:?}", self.actual_frames_per_callback)?;
+        writeln!(f, "default_period_hns: {:?}", self.default_period_hns)?;
+        writeln!(f, "min_period_hns: {:?}", self.min_period_hns)?;
+        writeln!(f, "actual_bits_per_sample: {:?}", self.actual_bits_per_sample)?;
+        writeln!(f, "actual_sample_type: {:?}", self.actual_sample_type)?;
+        writeln!(f, "actual_period_hns: {:?}", self.actual_period_hns)
     }
 }
 
@@ -70,6 +279,11 @@ pub struct WasapiBackend {
     actual_frames: Arc<AtomicU32>,
     device_name: Arc<Mutex<Option<String>>>,
     share_mode: Arc<Mutex<Option<ShareMode>>>,
+    default_period_hns: Arc<AtomicU32>,
+    min_period_hns: Arc<AtomicU32>,
+    actual_bits: Arc<AtomicU32>,
+    actual_sample_type: Arc<Mutex<Option<String>>>,
+    actual_period_hns: Arc<AtomicU32>,
 }
 
 impl WasapiBackend {
@@ -85,6 +299,11 @@ impl WasapiBackend {
             actual_frames: Arc::default(),
             device_name: Arc::default(),
             share_mode: Arc::default(),
+            default_period_hns: Arc::default(),
+            min_period_hns: Arc::default(),
+            actual_bits: Arc::default(),
+            actual_sample_type: Arc::default(),
+            actual_period_hns: Arc::default(),
         }
     }
 
@@ -98,6 +317,11 @@ impl WasapiBackend {
         channels: Arc<AtomicU32>,
         device_name: Arc<Mutex<Option<String>>>,
         share_mode: Arc<Mutex<Option<ShareMode>>>,
+        default_period_hns: Arc<AtomicU32>,
+        min_period_hns: Arc<AtomicU32>,
+        actual_bits: Arc<AtomicU32>,
+        actual_sample_type: Arc<Mutex<Option<String>>>,
+        actual_period_hns: Arc<AtomicU32>,
     ) -> Result<()> {
         let _ = initialize_mta().ok();
 
@@ -108,12 +332,11 @@ impl WasapiBackend {
         let dev_name = device.get_friendlyname().ok();
         *device_name.lock().unwrap() = dev_name;
 
-        let mut audio_client = device
-            .get_iaudioclient()
-            .context("get audio client")?;
-
         let mix_format = if settings.sample_rate.is_none() || settings.channels.is_none() {
-            Some(audio_client.get_mixformat().context("get mix format")?)
+            let client = device
+                .get_iaudioclient()
+                .context("get audio client")?;
+            Some(client.get_mixformat().context("get mix format")?)
         } else {
             None
         };
@@ -131,58 +354,63 @@ impl WasapiBackend {
         let desired_format =
             WaveFormat::new(32, 32, &SampleType::Float, desired_sr, desired_ch, None);
 
-        let (_blockalign, actual_format, mode) = if settings.exclusive {
-            let format = audio_client
-                .is_supported_exclusive_with_quirks(&desired_format)
-                .context("exclusive format not supported")?;
-            let blockalign = format.get_blockalign();
-            let (_def_period, min_period) = audio_client
-                .get_device_period()
-                .context("get device period")?;
-            let desired_period = audio_client
-                .calculate_aligned_period_near(
-                    if let Some(bs) = settings.buffer_size {
-                        calculate_period_100ns(bs as i64, format.get_samplespersec() as i64)
-                    } else {
-                        min_period
-                    },
-                    Some(128),
-                    &format,
-                )
-                .context("calculate aligned period")?;
-            (
-                blockalign,
-                format,
-                StreamMode::EventsExclusive {
-                    period_hns: desired_period,
-                },
+        let (audio_client, actual_format, conversion, mode) = if settings.exclusive {
+            probe_exclusive_format(
+                &device,
+                settings.sample_rate,
+                desired_ch,
+                settings.buffer_size,
+                Direction::Render,
             )
+            .context("exclusive format not supported")?
         } else {
-            let blockalign = desired_format.get_blockalign();
-            let (def_period, _min_period) = audio_client
+            let mut client = device
+                .get_iaudioclient()
+                .context("get audio client")?;
+            let (def_period, _min_period) = client
                 .get_device_period()
                 .context("get device period")?;
-            (
-                blockalign,
-                desired_format,
-                StreamMode::EventsShared {
-                    autoconvert: true,
-                    buffer_duration_hns: if let Some(bs) = settings.buffer_size {
-                        calculate_period_100ns(bs as i64, desired_sr as i64)
-                    } else {
-                        def_period
-                    },
+            let mode = StreamMode::EventsShared {
+                autoconvert: true,
+                buffer_duration_hns: if let Some(bs) = settings.buffer_size {
+                    calculate_period_100ns(bs as i64, desired_sr as i64)
+                } else {
+                    def_period
                 },
+            };
+            client
+                .initialize_client(&desired_format, &Direction::Render, &mode)
+                .context("initialize audio client")?;
+            (
+                client,
+                desired_format,
+                SampleConversion::Float32,
+                mode,
             )
         };
-
-        audio_client
-            .initialize_client(&actual_format, &Direction::Render, &mode)
-            .context("initialize audio client")?;
 
         let actual_sr = actual_format.get_samplespersec();
         let actual_ch = actual_format.get_nchannels();
         let actual_ch_u32 = actual_ch as u32;
+
+        let mut props = AudioClientProperties::new()
+            .set_category(settings.stream_category);
+        if settings.raw_stream {
+            props = props.set_option(StreamOption::Raw);
+        }
+        let _ = audio_client.set_properties(props);
+
+        if let Ok((def_per, min_per)) = audio_client.get_device_period() {
+            default_period_hns.store(def_per as u32, Ordering::Relaxed);
+            min_period_hns.store(min_per as u32, Ordering::Relaxed);
+        }
+        actual_period_hns.store(mode_period_hns(&mode), Ordering::Relaxed);
+        actual_bits.store(actual_format.get_bitspersample() as u32, Ordering::Relaxed);
+        *actual_sample_type.lock().unwrap() = match actual_format.get_subformat() {
+            Ok(SampleType::Float) => Some("Float".into()),
+            Ok(SampleType::Int) => Some("Int".into()),
+            Err(_) => None,
+        };
 
         sample_rate.store(actual_sr, Ordering::Relaxed);
         channels.store(actual_ch_u32, Ordering::Relaxed);
@@ -244,12 +472,9 @@ impl WasapiBackend {
                 mixer.render_stereo(&mut f32_buf);
             }
 
-            let n_bytes = n_samples * 4;
+            let n_bytes = n_samples * conversion.bytes_per_sample();
             byte_buf.resize(n_bytes, 0u8);
-            for (i, sample) in f32_buf.iter().enumerate() {
-                let bytes = sample.to_le_bytes();
-                byte_buf[i * 4..(i + 1) * 4].copy_from_slice(&bytes);
-            }
+            conversion.f32_to_bytes(&f32_buf, &mut byte_buf);
 
             if let Err(e) = render_client.write_to_device(buffer_frames as usize, &byte_buf, None) {
                 let _ = audio_client.stop_stream();
@@ -291,13 +516,18 @@ impl Backend for WasapiBackend {
         let channels = Arc::clone(&self.channels);
         let device_name = Arc::clone(&self.device_name);
         let share_mode = Arc::clone(&self.share_mode);
+        let default_period_hns = Arc::clone(&self.default_period_hns);
+        let min_period_hns = Arc::clone(&self.min_period_hns);
+        let actual_bits = Arc::clone(&self.actual_bits);
+        let actual_sample_type = Arc::clone(&self.actual_sample_type);
+        let actual_period_hns = Arc::clone(&self.actual_period_hns);
 
         running.store(true, Ordering::Relaxed);
 
         let join_handle = std::thread::Builder::new()
             .name("wasapi-playback".into())
             .spawn(move || {
-                if let Err(e) = WasapiBackend::run_playback(
+                let _ = WasapiBackend::run_playback(
                     settings,
                     state,
                     broken,
@@ -307,9 +537,12 @@ impl Backend for WasapiBackend {
                     channels,
                     device_name,
                     share_mode,
-                ) {
-                    eprintln!("wasapi playback error: {e}");
-                }
+                    default_period_hns,
+                    min_period_hns,
+                    actual_bits,
+                    actual_sample_type,
+                    actual_period_hns,
+                );
             })
             .context("spawn playback thread")?;
 
@@ -344,6 +577,23 @@ impl Backend for WasapiBackend {
             device_name: self.device_name.lock().unwrap().clone(),
             share_mode: *self.share_mode.lock().unwrap(),
             actual_frames_per_callback: if frames > 0 { Some(frames) } else { None },
+            default_period_hns: {
+                let v = self.default_period_hns.load(Ordering::Relaxed);
+                if v > 0 { Some(v) } else { None }
+            },
+            min_period_hns: {
+                let v = self.min_period_hns.load(Ordering::Relaxed);
+                if v > 0 { Some(v) } else { None }
+            },
+            actual_bits_per_sample: {
+                let v = self.actual_bits.load(Ordering::Relaxed);
+                if v > 0 { Some(v as u16) } else { None }
+            },
+            actual_sample_type: self.actual_sample_type.lock().unwrap().clone(),
+            actual_period_hns: {
+                let v = self.actual_period_hns.load(Ordering::Relaxed);
+                if v > 0 { Some(v) } else { None }
+            },
         })
     }
 }
@@ -365,6 +615,11 @@ pub struct WasapiRecorderBackend {
     actual_frames: Arc<AtomicU32>,
     device_name: Arc<Mutex<Option<String>>>,
     share_mode: Arc<Mutex<Option<ShareMode>>>,
+    default_period_hns: Arc<AtomicU32>,
+    min_period_hns: Arc<AtomicU32>,
+    actual_bits: Arc<AtomicU32>,
+    actual_sample_type: Arc<Mutex<Option<String>>>,
+    actual_period_hns: Arc<AtomicU32>,
 }
 
 impl WasapiRecorderBackend {
@@ -380,6 +635,11 @@ impl WasapiRecorderBackend {
             actual_frames: Arc::default(),
             device_name: Arc::default(),
             share_mode: Arc::default(),
+            default_period_hns: Arc::default(),
+            min_period_hns: Arc::default(),
+            actual_bits: Arc::default(),
+            actual_sample_type: Arc::default(),
+            actual_period_hns: Arc::default(),
         }
     }
 
@@ -393,6 +653,11 @@ impl WasapiRecorderBackend {
         channels: Arc<AtomicU32>,
         device_name: Arc<Mutex<Option<String>>>,
         share_mode: Arc<Mutex<Option<ShareMode>>>,
+        default_period_hns: Arc<AtomicU32>,
+        min_period_hns: Arc<AtomicU32>,
+        actual_bits: Arc<AtomicU32>,
+        actual_sample_type: Arc<Mutex<Option<String>>>,
+        actual_period_hns: Arc<AtomicU32>,
     ) -> Result<()> {
         let _ = initialize_mta().ok();
 
@@ -403,12 +668,11 @@ impl WasapiRecorderBackend {
         let dev_name = device.get_friendlyname().ok();
         *device_name.lock().unwrap() = dev_name;
 
-        let mut audio_client = device
-            .get_iaudioclient()
-            .context("get audio client")?;
-
         let mix_format = if settings.sample_rate.is_none() || settings.channels.is_none() {
-            Some(audio_client.get_mixformat().context("get mix format")?)
+            let client = device
+                .get_iaudioclient()
+                .context("get audio client")?;
+            Some(client.get_mixformat().context("get mix format")?)
         } else {
             None
         };
@@ -423,56 +687,65 @@ impl WasapiRecorderBackend {
         } else {
             mix_format.as_ref().unwrap().get_nchannels() as usize
         };
-        let desired_format =
-            WaveFormat::new(32, 32, &SampleType::Float, desired_sr, desired_ch, None);
 
-        let (actual_format, mode) = if settings.exclusive {
-            let format = audio_client
-                .is_supported_exclusive_with_quirks(&desired_format)
-                .context("exclusive capture format not supported")?;
-            let (_def_period, min_period) = audio_client
-                .get_device_period()
-                .context("get device period")?;
-            let desired_period = audio_client
-                .calculate_aligned_period_near(
-                    if let Some(bs) = settings.buffer_size {
-                        calculate_period_100ns(bs as i64, format.get_samplespersec() as i64)
-                    } else {
-                        min_period
-                    },
-                    Some(128),
-                    &format,
-                )
-                .context("calculate aligned period")?;
-            (
-                format,
-                StreamMode::EventsExclusive {
-                    period_hns: desired_period,
-                },
+        let (audio_client, actual_format, conversion, mode) = if settings.exclusive {
+            probe_exclusive_format(
+                &device,
+                settings.sample_rate,
+                desired_ch,
+                settings.buffer_size,
+                Direction::Capture,
             )
+            .context("exclusive capture format not supported")?
         } else {
-            let (def_period, _min_period) = audio_client
+            let desired_format =
+                WaveFormat::new(32, 32, &SampleType::Float, desired_sr, desired_ch, None);
+            let mut client = device
+                .get_iaudioclient()
+                .context("get audio client")?;
+            let (def_period, _min_period) = client
                 .get_device_period()
                 .context("get device period")?;
-            (
-                desired_format,
-                StreamMode::EventsShared {
-                    autoconvert: true,
-                    buffer_duration_hns: if let Some(bs) = settings.buffer_size {
-                        calculate_period_100ns(bs as i64, desired_sr as i64)
-                    } else {
-                        def_period
-                    },
+            let mode = StreamMode::EventsShared {
+                autoconvert: true,
+                buffer_duration_hns: if let Some(bs) = settings.buffer_size {
+                    calculate_period_100ns(bs as i64, desired_sr as i64)
+                } else {
+                    def_period
                 },
+            };
+            client
+                .initialize_client(&desired_format, &Direction::Capture, &mode)
+                .context("initialize audio client")?;
+            (
+                client,
+                desired_format,
+                SampleConversion::Float32,
+                mode,
             )
         };
 
-        audio_client
-            .initialize_client(&actual_format, &Direction::Capture, &mode)
-            .context("initialize audio client")?;
-
         let actual_sr = actual_format.get_samplespersec();
         let actual_ch = actual_format.get_nchannels();
+
+        let mut props = AudioClientProperties::new()
+            .set_category(settings.stream_category);
+        if settings.raw_stream {
+            props = props.set_option(StreamOption::Raw);
+        }
+        let _ = audio_client.set_properties(props);
+
+        if let Ok((def_per, min_per)) = audio_client.get_device_period() {
+            default_period_hns.store(def_per as u32, Ordering::Relaxed);
+            min_period_hns.store(min_per as u32, Ordering::Relaxed);
+        }
+        actual_period_hns.store(mode_period_hns(&mode), Ordering::Relaxed);
+        actual_bits.store(actual_format.get_bitspersample() as u32, Ordering::Relaxed);
+        *actual_sample_type.lock().unwrap() = match actual_format.get_subformat() {
+            Ok(SampleType::Float) => Some("Float".into()),
+            Ok(SampleType::Int) => Some("Int".into()),
+            Err(_) => None,
+        };
 
         sample_rate.store(actual_sr, Ordering::Relaxed);
         channels.store(actual_ch as u32, Ordering::Relaxed);
@@ -495,6 +768,7 @@ impl WasapiRecorderBackend {
         let buffer_size = audio_client.get_buffer_size().context("get buffer size")? as usize;
         let bytes_per_frame = actual_format.get_blockalign() as usize;
         let mut byte_buf: Vec<u8> = vec![0u8; bytes_per_frame * (buffer_size + 1024)];
+        let mut f32_buf: Vec<f32> = Vec::new();
         let mut loop_result = Ok(());
 
         loop {
@@ -526,24 +800,14 @@ impl WasapiRecorderBackend {
             actual_frames.store(nbr_frames, Ordering::Relaxed);
 
             let n_samples = nbr_frames as usize * actual_ch as usize;
-            let expected_bytes = n_samples * 4;
-
-            let f32_slice: &[f32] = if byte_buf.len() >= expected_bytes {
-                let ptr = byte_buf.as_ptr() as *const f32;
-                unsafe { std::slice::from_raw_parts(ptr, n_samples) }
-            } else {
-                byte_buf.resize(expected_bytes, 0u8);
-                let ptr = byte_buf.as_ptr() as *const f32;
-                unsafe { std::slice::from_raw_parts(ptr, n_samples) }
-            };
-
-            let captured_slice = &f32_slice[..n_samples];
+            f32_buf.resize(n_samples, 0f32);
+            conversion.bytes_to_f32(&byte_buf, &mut f32_buf);
 
             let (mixer, rec) = state.get();
             if actual_ch == 1 {
-                mixer.record_mono(captured_slice);
+                mixer.record_mono(&f32_buf);
             } else {
-                mixer.record_stereo(captured_slice);
+                mixer.record_stereo(&f32_buf);
             }
 
             let latency_sec = nbr_frames as f64 / actual_sr as f64;
@@ -577,13 +841,18 @@ impl RecorderBackend for WasapiRecorderBackend {
         let channels = Arc::clone(&self.channels);
         let device_name = Arc::clone(&self.device_name);
         let share_mode = Arc::clone(&self.share_mode);
+        let default_period_hns = Arc::clone(&self.default_period_hns);
+        let min_period_hns = Arc::clone(&self.min_period_hns);
+        let actual_bits = Arc::clone(&self.actual_bits);
+        let actual_sample_type = Arc::clone(&self.actual_sample_type);
+        let actual_period_hns = Arc::clone(&self.actual_period_hns);
 
         running.store(true, Ordering::Relaxed);
 
         let join_handle = std::thread::Builder::new()
             .name("wasapi-capture".into())
             .spawn(move || {
-                if let Err(e) = WasapiRecorderBackend::run_capture(
+                let _ = WasapiRecorderBackend::run_capture(
                     settings,
                     state,
                     broken,
@@ -593,9 +862,12 @@ impl RecorderBackend for WasapiRecorderBackend {
                     channels,
                     device_name,
                     share_mode,
-                ) {
-                    eprintln!("wasapi capture error: {e}");
-                }
+                    default_period_hns,
+                    min_period_hns,
+                    actual_bits,
+                    actual_sample_type,
+                    actual_period_hns,
+                );
             })
             .context("spawn capture thread")?;
 
@@ -630,6 +902,23 @@ impl RecorderBackend for WasapiRecorderBackend {
             device_name: self.device_name.lock().unwrap().clone(),
             share_mode: *self.share_mode.lock().unwrap(),
             actual_frames_per_callback: if frames > 0 { Some(frames) } else { None },
+            default_period_hns: {
+                let v = self.default_period_hns.load(Ordering::Relaxed);
+                if v > 0 { Some(v) } else { None }
+            },
+            min_period_hns: {
+                let v = self.min_period_hns.load(Ordering::Relaxed);
+                if v > 0 { Some(v) } else { None }
+            },
+            actual_bits_per_sample: {
+                let v = self.actual_bits.load(Ordering::Relaxed);
+                if v > 0 { Some(v as u16) } else { None }
+            },
+            actual_sample_type: self.actual_sample_type.lock().unwrap().clone(),
+            actual_period_hns: {
+                let v = self.actual_period_hns.load(Ordering::Relaxed);
+                if v > 0 { Some(v) } else { None }
+            },
         })
     }
 }
