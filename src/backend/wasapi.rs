@@ -510,6 +510,7 @@ impl Backend for WasapiBackend {
         let settings = self.settings.clone();
         let state = Arc::clone(self.state.as_ref().context("not set up")?);
         let broken = Arc::clone(&self.broken);
+        let handle_broken = Arc::clone(&self.broken);
         let running = Arc::clone(&self.running);
         let actual_frames = Arc::clone(&self.actual_frames);
         let sample_rate = Arc::clone(&self.sample_rate);
@@ -527,7 +528,7 @@ impl Backend for WasapiBackend {
         let join_handle = std::thread::Builder::new()
             .name("wasapi-playback".into())
             .spawn(move || {
-                let _ = WasapiBackend::run_playback(
+                if WasapiBackend::run_playback(
                     settings,
                     state,
                     broken,
@@ -542,7 +543,9 @@ impl Backend for WasapiBackend {
                     actual_bits,
                     actual_sample_type,
                     actual_period_hns,
-                );
+                ).is_err() {
+                    handle_broken.store(true, Ordering::Relaxed);
+                };
             })
             .context("spawn playback thread")?;
 
@@ -835,6 +838,7 @@ impl RecorderBackend for WasapiRecorderBackend {
         let settings = self.settings.clone();
         let state = Arc::clone(self.state.as_ref().context("not set up")?);
         let broken = Arc::clone(&self.broken);
+        let handle_broken = Arc::clone(&broken);
         let running = Arc::clone(&self.running);
         let actual_frames = Arc::clone(&self.actual_frames);
         let sample_rate = Arc::clone(&self.sample_rate);
@@ -852,7 +856,7 @@ impl RecorderBackend for WasapiRecorderBackend {
         let join_handle = std::thread::Builder::new()
             .name("wasapi-capture".into())
             .spawn(move || {
-                let _ = WasapiRecorderBackend::run_capture(
+                if WasapiRecorderBackend::run_capture(
                     settings,
                     state,
                     broken,
@@ -867,7 +871,9 @@ impl RecorderBackend for WasapiRecorderBackend {
                     actual_bits,
                     actual_sample_type,
                     actual_period_hns,
-                );
+                ).is_err() {
+                    handle_broken.store(true, Ordering::Relaxed);
+                }
             })
             .context("spawn capture thread")?;
 
