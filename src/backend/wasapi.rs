@@ -8,10 +8,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-pub use wasapi::{ShareMode, StreamCategory};
+pub use wasapi::{ShareMode, StreamCategory, StreamOption};
 use wasapi::{
     calculate_period_100ns, initialize_mta, AudioClient, AudioClientProperties, Device,
-    DeviceEnumerator, Direction, SampleType, StreamMode, StreamOption, WaveFormat,
+    DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat,
 };
 
 use super::{BackendSetup, BackendStreamInfo, RecorderBackendSetup, RecorderStateCell, StateCell};
