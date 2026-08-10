@@ -219,7 +219,7 @@ pub struct WasapiSettings {
     pub channels: Option<u16>,
     pub share_mode: ShareMode,
     pub stream_category: StreamCategory,
-    pub raw_stream: bool,
+    pub stream_option: Option<StreamOption>,
 }
 
 impl Default for WasapiSettings {
@@ -229,8 +229,8 @@ impl Default for WasapiSettings {
             sample_rate: None,
             channels: None,
             share_mode: ShareMode::Shared,
-            stream_category: StreamCategory::Media,
-            raw_stream: false,
+            stream_category: StreamCategory::Other,
+            stream_option: None,
         }
     }
 }
@@ -432,8 +432,8 @@ impl WasapiBackend {
 
         let mut props = AudioClientProperties::new()
             .set_category(settings.stream_category);
-        if settings.raw_stream {
-            props = props.set_option(StreamOption::Raw);
+        if let Some(stream_option) = settings.stream_option {
+            props = props.set_option(stream_option);
         }
         let _ = audio_client.set_properties(props);
 
@@ -852,8 +852,8 @@ impl WasapiRecorderBackend {
 
         let mut props = AudioClientProperties::new()
             .set_category(settings.stream_category);
-        if settings.raw_stream {
-            props = props.set_option(StreamOption::Raw);
+        if let Some(stream_option) = settings.stream_option {
+            props = props.set_option(stream_option);
         }
         let _ = audio_client.set_properties(props);
 
