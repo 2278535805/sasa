@@ -4,6 +4,7 @@ use std::{
         Arc, Mutex,
     },
     thread::JoinHandle,
+    time::Instant,
 };
 
 use anyhow::{Context, Result};
@@ -480,6 +481,8 @@ impl WasapiBackend {
                 break;
             }
 
+            let callback_instant = Instant::now();
+
             let buffer_frames = match audio_client.get_available_space_in_frames() {
                 Ok(f) => f,
                 Err(e) => {
@@ -523,16 +526,22 @@ impl WasapiBackend {
                 break;
             }
 
-            let latency_sec = buffer_frames as f64 / actual_sr as f64;
-            rec.push(latency_sec);
-
-            let _ = audio_client.get_current_padding().map(|p| current_padding.store(p, Ordering::Relaxed));
+            let post_padding = audio_client.get_current_padding().unwrap_or(0);
+            current_padding.store(post_padding, Ordering::Relaxed);
             available_space.store(buffer_frames, Ordering::Relaxed);
             if let Some(ref clock) = audio_clock {
                 if let Ok((pos, _timer)) = clock.get_position() {
                     clock_position.store(pos, Ordering::Relaxed);
                 }
             }
+
+            let stream_delay_sec = if post_padding > 0 {
+                post_padding as f64 / actual_sr as f64
+            } else {
+                buffer_frames as f64 / actual_sr as f64
+            };
+            let total_delay_sec = stream_delay_sec + callback_instant.elapsed().as_secs_f64();
+            rec.push(total_delay_sec);
 
             if h_event.wait_for_event(1000).is_err() {
                 let _ = audio_client.stop_stream();
@@ -545,8 +554,6 @@ impl WasapiBackend {
         loop_result
     }
 }
-
-// —— WasapiRecorderBackend ——
 
 impl Backend for WasapiBackend {
     fn setup(&mut self, setup: BackendSetup) -> Result<()> {
@@ -896,6 +903,8 @@ impl WasapiRecorderBackend {
                 break;
             }
 
+            let callback_instant = Instant::now();
+
             let (nbr_frames, _info) = match capture_client.read_from_device(&mut byte_buf) {
                 Ok(v) => v,
                 Err(e) => {
@@ -929,16 +938,22 @@ impl WasapiRecorderBackend {
                 mixer.record_stereo(&f32_buf);
             }
 
-            let latency_sec = nbr_frames as f64 / actual_sr as f64;
-            rec.push(latency_sec);
-
-            let _ = audio_client.get_current_padding().map(|p| current_padding.store(p, Ordering::Relaxed));
+            let post_padding = audio_client.get_current_padding().unwrap_or(0);
+            current_padding.store(post_padding, Ordering::Relaxed);
             available_space.store(nbr_frames, Ordering::Relaxed);
             if let Some(ref clock) = audio_clock {
                 if let Ok((pos, _timer)) = clock.get_position() {
                     clock_position.store(pos, Ordering::Relaxed);
                 }
             }
+
+            let stream_delay_sec = if post_padding > 0 {
+                post_padding as f64 / actual_sr as f64
+            } else {
+                nbr_frames as f64 / actual_sr as f64
+            };
+            let total_delay_sec = stream_delay_sec + callback_instant.elapsed().as_secs_f64();
+            rec.push(total_delay_sec);
 
             if h_event.wait_for_event(1000).is_err() {
                 let _ = audio_client.stop_stream();
