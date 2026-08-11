@@ -17,6 +17,7 @@ pub(crate) struct SfxRenderer {
     clip: AudioClip,
     arc: Weak<()>,
     cons: HeapConsumer<(f64, PlaySfxParams)>,
+    buffer: Vec<f32>,
 }
 
 impl Renderer for SfxRenderer {
@@ -27,8 +28,9 @@ impl Renderer for SfxRenderer {
     fn render_mono(&mut self, sample_rate: u32, data: &mut [f32]) {
         let delta = 1. / sample_rate as f64;
         let mut pop_count = 0;
+        self.buffer.resize(data.len(), 0.0);
         for (position, params) in self.cons.iter_mut() {
-            for sample in data.iter_mut() {
+            for sample in self.buffer.iter_mut() {
                 if let Some(frame) = self.clip.sample(*position) {
                     *sample += frame.avg() * params.amplifier;
                 } else {
@@ -38,8 +40,8 @@ impl Renderer for SfxRenderer {
                 *position += delta;
             }
         }
-        for sample in data.iter_mut() {
-            *sample = sample.clamp(-1.0, 1.0);
+        for (data_sample, buffer_sample) in data.iter_mut().zip(self.buffer.iter_mut()) {
+            *data_sample += std::mem::take(buffer_sample).clamp(-1.0, 1.0);
         }
         unsafe {
             self.cons.advance(pop_count);
@@ -49,8 +51,9 @@ impl Renderer for SfxRenderer {
     fn render_stereo(&mut self, sample_rate: u32, data: &mut [f32]) {
         let delta = 1. / sample_rate as f64;
         let mut pop_count = 0;
+        self.buffer.resize(data.len(), 0.0);
         for (position, params) in self.cons.iter_mut() {
-            for sample in data.chunks_exact_mut(2) {
+            for sample in self.buffer.chunks_exact_mut(2) {
                 if let Some(frame) = self.clip.sample(*position) {
                     sample[0] += frame.0 * params.amplifier;
                     sample[1] += frame.1 * params.amplifier;
@@ -61,9 +64,8 @@ impl Renderer for SfxRenderer {
                 *position += delta;
             }
         }
-        for sample in data.chunks_exact_mut(2) {
-            sample[0] = sample[0].clamp(-1.0, 1.0);
-            sample[1] = sample[1].clamp(-1.0, 1.0);
+        for (data_sample, buffer_sample) in data.iter_mut().zip(self.buffer.iter_mut()) {
+            *data_sample += std::mem::take(buffer_sample).clamp(-1.0, 1.0);
         }
         unsafe {
             self.cons.advance(pop_count);
@@ -85,6 +87,7 @@ impl Sfx {
             clip,
             arc: Arc::downgrade(&arc),
             cons,
+            buffer: Vec::new(),
         };
         (Self { _arc: arc, prod }, renderer)
     }
