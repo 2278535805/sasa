@@ -244,6 +244,7 @@ pub struct WasapiStreamInfo {
     pub actual_frames_per_callback: Option<u32>,
     pub default_period_hns: Option<u32>,
     pub min_period_hns: Option<u32>,
+    pub min_aligned_period_hns: Option<u32>,
     pub actual_bits_per_sample: Option<u16>,
     pub actual_valid_bits_per_sample: Option<u16>,
     pub actual_sample_type: Option<String>,
@@ -269,6 +270,7 @@ impl std::fmt::Display for WasapiStreamInfo {
         writeln!(f, "actual_frames_per_callback: {:?}", self.actual_frames_per_callback)?;
         writeln!(f, "default_period_hns: {:?}", self.default_period_hns)?;
         writeln!(f, "min_period_hns: {:?}", self.min_period_hns)?;
+        writeln!(f, "min_aligned_period_hns: {:?}", self.min_aligned_period_hns)?;
         writeln!(f, "actual_bits_per_sample: {:?}", self.actual_bits_per_sample)?;
         writeln!(f, "actual_valid_bits_per_sample: {:?}", self.actual_valid_bits_per_sample)?;
         writeln!(f, "actual_sample_type: {:?}", self.actual_sample_type)?;
@@ -296,6 +298,7 @@ pub struct WasapiBackend {
     device_name: Arc<Mutex<Option<String>>>,
     default_period_hns: Arc<AtomicU32>,
     min_period_hns: Arc<AtomicU32>,
+    min_aligned_period_hns: Arc<AtomicU32>,
     actual_bits: Arc<AtomicU32>,
     actual_valid_bits: Arc<AtomicU32>,
     actual_sample_type: Arc<Mutex<Option<String>>>,
@@ -322,6 +325,7 @@ impl WasapiBackend {
             device_name: Arc::default(),
             default_period_hns: Arc::default(),
             min_period_hns: Arc::default(),
+            min_aligned_period_hns: Arc::default(),
             actual_bits: Arc::default(),
             actual_valid_bits: Arc::default(),
             actual_sample_type: Arc::default(),
@@ -347,6 +351,7 @@ impl WasapiBackend {
         device_name: Arc<Mutex<Option<String>>>,
         default_period_hns: Arc<AtomicU32>,
         min_period_hns: Arc<AtomicU32>,
+        min_aligned_period_hns: Arc<AtomicU32>,
         actual_bits: Arc<AtomicU32>,
         actual_valid_bits: Arc<AtomicU32>,
         actual_sample_type: Arc<Mutex<Option<String>>>,
@@ -404,9 +409,11 @@ impl WasapiBackend {
             let mut client = device
                 .get_iaudioclient()
                 .context("get audio client")?;
-            let (def_period, _min_period) = client
+            let (def_period, min_period) = client
                 .get_device_period()
                 .context("get device period")?;
+            default_period_hns.store(def_period as u32, Ordering::Relaxed);
+            min_period_hns.store(min_period as u32, Ordering::Relaxed);
             let mode = StreamMode::EventsShared {
                 autoconvert: true,
                 buffer_duration_hns: if let Some(bs) = settings.buffer_size {
@@ -437,11 +444,12 @@ impl WasapiBackend {
         }
         let _ = audio_client.set_properties(props);
 
-        if let Ok((def_per, min_per)) = audio_client.get_device_period() {
-            default_period_hns.store(def_per as u32, Ordering::Relaxed);
-            min_period_hns.store(min_per as u32, Ordering::Relaxed);
-        }
         actual_period_hns.store(mode_period_hns(&mode), Ordering::Relaxed);
+        if let Ok(aligned_min) =
+            audio_client.calculate_aligned_period_near(0, Some(128), &actual_format)
+        {
+            min_aligned_period_hns.store(aligned_min as u32, Ordering::Relaxed);
+        }
         actual_bits.store(actual_format.get_bitspersample() as u32, Ordering::Relaxed);
         actual_valid_bits.store(actual_format.get_validbitspersample() as u32, Ordering::Relaxed);
         channel_mask.store(actual_format.get_dwchannelmask(), Ordering::Relaxed);
@@ -573,6 +581,7 @@ impl Backend for WasapiBackend {
         let device_name = Arc::clone(&self.device_name);
         let default_period_hns = Arc::clone(&self.default_period_hns);
         let min_period_hns = Arc::clone(&self.min_period_hns);
+        let min_aligned_period_hns = Arc::clone(&self.min_aligned_period_hns);
         let actual_bits = Arc::clone(&self.actual_bits);
         let actual_sample_type = Arc::clone(&self.actual_sample_type);
         let actual_period_hns = Arc::clone(&self.actual_period_hns);
@@ -601,6 +610,7 @@ impl Backend for WasapiBackend {
                     device_name,
                     default_period_hns,
                     min_period_hns,
+                    min_aligned_period_hns,
                     actual_bits,
                     actual_valid_bits,
                     actual_sample_type,
@@ -654,6 +664,10 @@ impl Backend for WasapiBackend {
             },
             min_period_hns: {
                 let v = self.min_period_hns.load(Ordering::Relaxed);
+                if v > 0 { Some(v) } else { None }
+            },
+            min_aligned_period_hns: {
+                let v = self.min_aligned_period_hns.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             actual_bits_per_sample: {
@@ -716,6 +730,7 @@ pub struct WasapiRecorderBackend {
     device_name: Arc<Mutex<Option<String>>>,
     default_period_hns: Arc<AtomicU32>,
     min_period_hns: Arc<AtomicU32>,
+    min_aligned_period_hns: Arc<AtomicU32>,
     actual_bits: Arc<AtomicU32>,
     actual_valid_bits: Arc<AtomicU32>,
     actual_sample_type: Arc<Mutex<Option<String>>>,
@@ -743,6 +758,7 @@ impl WasapiRecorderBackend {
             device_name: Arc::default(),
             default_period_hns: Arc::default(),
             min_period_hns: Arc::default(),
+            min_aligned_period_hns: Arc::default(),
             actual_bits: Arc::default(),
             actual_valid_bits: Arc::default(),
             actual_sample_type: Arc::default(),
@@ -768,6 +784,7 @@ impl WasapiRecorderBackend {
         device_name: Arc<Mutex<Option<String>>>,
         default_period_hns: Arc<AtomicU32>,
         min_period_hns: Arc<AtomicU32>,
+        min_aligned_period_hns: Arc<AtomicU32>,
         actual_bits: Arc<AtomicU32>,
         actual_valid_bits: Arc<AtomicU32>,
         actual_sample_type: Arc<Mutex<Option<String>>>,
@@ -825,9 +842,11 @@ impl WasapiRecorderBackend {
             let mut client = device
                 .get_iaudioclient()
                 .context("get audio client")?;
-            let (def_period, _min_period) = client
+            let (def_period, min_period) = client
                 .get_device_period()
                 .context("get device period")?;
+            default_period_hns.store(def_period as u32, Ordering::Relaxed);
+            min_period_hns.store(min_period as u32, Ordering::Relaxed);
             let mode = StreamMode::EventsShared {
                 autoconvert: true,
                 buffer_duration_hns: if let Some(bs) = settings.buffer_size {
@@ -857,11 +876,12 @@ impl WasapiRecorderBackend {
         }
         let _ = audio_client.set_properties(props);
 
-        if let Ok((def_per, min_per)) = audio_client.get_device_period() {
-            default_period_hns.store(def_per as u32, Ordering::Relaxed);
-            min_period_hns.store(min_per as u32, Ordering::Relaxed);
-        }
         actual_period_hns.store(mode_period_hns(&mode), Ordering::Relaxed);
+        if let Ok(aligned_min) =
+            audio_client.calculate_aligned_period_near(0, Some(128), &actual_format)
+        {
+            min_aligned_period_hns.store(aligned_min as u32, Ordering::Relaxed);
+        }
         actual_bits.store(actual_format.get_bitspersample() as u32, Ordering::Relaxed);
         actual_valid_bits.store(actual_format.get_validbitspersample() as u32, Ordering::Relaxed);
         channel_mask.store(actual_format.get_dwchannelmask(), Ordering::Relaxed);
@@ -985,6 +1005,7 @@ impl RecorderBackend for WasapiRecorderBackend {
         let device_name = Arc::clone(&self.device_name);
         let default_period_hns = Arc::clone(&self.default_period_hns);
         let min_period_hns = Arc::clone(&self.min_period_hns);
+        let min_aligned_period_hns = Arc::clone(&self.min_aligned_period_hns);
         let actual_bits = Arc::clone(&self.actual_bits);
         let actual_sample_type = Arc::clone(&self.actual_sample_type);
         let actual_period_hns = Arc::clone(&self.actual_period_hns);
@@ -1013,6 +1034,7 @@ impl RecorderBackend for WasapiRecorderBackend {
                     device_name,
                     default_period_hns,
                     min_period_hns,
+                    min_aligned_period_hns,
                     actual_bits,
                     actual_valid_bits,
                     actual_sample_type,
@@ -1066,6 +1088,10 @@ impl RecorderBackend for WasapiRecorderBackend {
             },
             min_period_hns: {
                 let v = self.min_period_hns.load(Ordering::Relaxed);
+                if v > 0 { Some(v) } else { None }
+            },
+            min_aligned_period_hns: {
+                let v = self.min_aligned_period_hns.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             actual_bits_per_sample: {
