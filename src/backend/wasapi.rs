@@ -409,11 +409,9 @@ impl WasapiBackend {
             let mut client = device
                 .get_iaudioclient()
                 .context("get audio client")?;
-            let (def_period, min_period) = client
+            let (def_period, _min_period) = client
                 .get_device_period()
                 .context("get device period")?;
-            default_period_hns.store(def_period as u32, Ordering::Relaxed);
-            min_period_hns.store(min_period as u32, Ordering::Relaxed);
             let mode = StreamMode::EventsShared {
                 autoconvert: true,
                 buffer_duration_hns: if let Some(bs) = settings.buffer_size {
@@ -444,6 +442,10 @@ impl WasapiBackend {
         }
         let _ = audio_client.set_properties(props);
 
+        if let Ok((def_per, min_per)) = audio_client.get_device_period() {
+            default_period_hns.store(def_per as u32, Ordering::Relaxed);
+            min_period_hns.store(min_per as u32, Ordering::Relaxed);
+        }
         actual_period_hns.store(mode_period_hns(&mode), Ordering::Relaxed);
         if let Ok(aligned_min) =
             audio_client.calculate_aligned_period_near(0, Some(128), &actual_format)
@@ -842,11 +844,9 @@ impl WasapiRecorderBackend {
             let mut client = device
                 .get_iaudioclient()
                 .context("get audio client")?;
-            let (def_period, min_period) = client
+            let (def_period, _min_period) = client
                 .get_device_period()
                 .context("get device period")?;
-            default_period_hns.store(def_period as u32, Ordering::Relaxed);
-            min_period_hns.store(min_period as u32, Ordering::Relaxed);
             let mode = StreamMode::EventsShared {
                 autoconvert: true,
                 buffer_duration_hns: if let Some(bs) = settings.buffer_size {
@@ -876,6 +876,10 @@ impl WasapiRecorderBackend {
         }
         let _ = audio_client.set_properties(props);
 
+        if let Ok((def_per, min_per)) = audio_client.get_device_period() {
+            default_period_hns.store(def_per as u32, Ordering::Relaxed);
+            min_period_hns.store(min_per as u32, Ordering::Relaxed);
+        }
         actual_period_hns.store(mode_period_hns(&mode), Ordering::Relaxed);
         if let Ok(aligned_min) =
             audio_client.calculate_aligned_period_near(0, Some(128), &actual_format)
