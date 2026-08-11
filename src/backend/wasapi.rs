@@ -123,6 +123,8 @@ fn probe_exclusive_format(
     desired_ch: usize,
     buffer_size: Option<u32>,
     direction: Direction,
+    stream_category: StreamCategory,
+    stream_option: Option<StreamOption>,
 ) -> Result<(AudioClient, WaveFormat, SampleConversion, StreamMode)> {
     let sample_rates: Vec<usize> = if let Some(sr) = sample_rate {
         vec![sr as usize]
@@ -195,6 +197,15 @@ fn probe_exclusive_format(
             let mode = StreamMode::EventsExclusive {
                 period_hns: desired_period,
             };
+
+            let props = {
+                let mut p = AudioClientProperties::new().set_category(stream_category);
+                if let Some(opt) = stream_option {
+                    p = p.set_option(opt);
+                }
+                p
+            };
+            let _ = audio_client.set_properties(props);
 
             match audio_client.initialize_client(&supported, &direction, &mode) {
                 Ok(()) => return Ok((audio_client, supported, *conversion, mode)),
@@ -403,6 +414,8 @@ impl WasapiBackend {
                 desired_ch,
                 settings.buffer_size,
                 Direction::Render,
+                settings.stream_category,
+                settings.stream_option,
             )
             .context("exclusive format not supported")?
         } else {
@@ -420,6 +433,14 @@ impl WasapiBackend {
                     def_period
                 },
             };
+            let props = {
+                let mut p = AudioClientProperties::new().set_category(settings.stream_category);
+                if let Some(opt) = settings.stream_option {
+                    p = p.set_option(opt);
+                }
+                p
+            };
+            let _ = client.set_properties(props);
             client
                 .initialize_client(&desired_format, &Direction::Render, &mode)
                 .context("initialize audio client")?;
@@ -434,13 +455,6 @@ impl WasapiBackend {
         let actual_sr = actual_format.get_samplespersec();
         let actual_ch = actual_format.get_nchannels();
         let actual_ch_u32 = actual_ch as u32;
-
-        let mut props = AudioClientProperties::new()
-            .set_category(settings.stream_category);
-        if let Some(stream_option) = settings.stream_option {
-            props = props.set_option(stream_option);
-        }
-        let _ = audio_client.set_properties(props);
 
         if let Ok((def_per, min_per)) = audio_client.get_device_period() {
             default_period_hns.store(def_per as u32, Ordering::Relaxed);
@@ -836,6 +850,8 @@ impl WasapiRecorderBackend {
                 desired_ch,
                 settings.buffer_size,
                 Direction::Capture,
+                settings.stream_category,
+                settings.stream_option,
             )
             .context("exclusive capture format not supported")?
         } else {
@@ -855,6 +871,14 @@ impl WasapiRecorderBackend {
                     def_period
                 },
             };
+            let props = {
+                let mut p = AudioClientProperties::new().set_category(settings.stream_category);
+                if let Some(opt) = settings.stream_option {
+                    p = p.set_option(opt);
+                }
+                p
+            };
+            let _ = client.set_properties(props);
             client
                 .initialize_client(&desired_format, &Direction::Capture, &mode)
                 .context("initialize audio client")?;
@@ -868,13 +892,6 @@ impl WasapiRecorderBackend {
 
         let actual_sr = actual_format.get_samplespersec();
         let actual_ch = actual_format.get_nchannels();
-
-        let mut props = AudioClientProperties::new()
-            .set_category(settings.stream_category);
-        if let Some(stream_option) = settings.stream_option {
-            props = props.set_option(stream_option);
-        }
-        let _ = audio_client.set_properties(props);
 
         if let Ok((def_per, min_per)) = audio_client.get_device_period() {
             default_period_hns.store(def_per as u32, Ordering::Relaxed);
