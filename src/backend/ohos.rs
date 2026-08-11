@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::{
     ffi::c_void,
     ptr,
@@ -15,16 +15,18 @@ use ohos_audio_sys::{
     OH_AudioCapturer_GetFramesRead, OH_AudioCapturer_GetLatencyMode,
     OH_AudioCapturer_GetOverflowCount, OH_AudioCapturer_GetSamplingRate,
     OH_AudioCapturer_GetSampleFormat, OH_AudioCapturer_GetStreamId, OH_AudioCapturer_Release,
-    OH_AudioCapturer_Start, OH_AudioInterrupt_ForceType, OH_AudioInterrupt_Hint,
+    OH_AudioCapturer_Start, OH_AudioCapturer_Stop, OH_AudioInterrupt_ForceType,
+    OH_AudioInterrupt_Hint,
     OH_AudioInterrupt_Hint_AUDIOSTREAM_INTERRUPT_HINT_PAUSE,
-    OH_AudioInterrupt_Hint_AUDIOSTREAM_INTERRUPT_HINT_STOP, OH_AudioRenderer,
+    OH_AudioInterrupt_Hint_AUDIOSTREAM_INTERRUPT_HINT_STOP,
+    OH_AudioRenderer,
     OH_AudioRenderer_Callbacks, OH_AudioRenderer_GetChannelCount, OH_AudioRenderer_GetChannelLayout,
     OH_AudioRenderer_GetCurrentState, OH_AudioRenderer_GetEncodingType,
     OH_AudioRenderer_GetFastStatus, OH_AudioRenderer_GetFrameSizeInCallback,
     OH_AudioRenderer_GetFramesWritten, OH_AudioRenderer_GetLatencyMode,
     OH_AudioRenderer_GetSamplingRate, OH_AudioRenderer_GetSampleFormat,
     OH_AudioRenderer_GetStreamId, OH_AudioRenderer_GetUnderflowCount, OH_AudioRenderer_Release,
-    OH_AudioRenderer_Start, OH_AudioStreamBuilder, OH_AudioStreamBuilder_Create,
+    OH_AudioRenderer_Start, OH_AudioRenderer_Stop, OH_AudioStreamBuilder, OH_AudioStreamBuilder_Create,
     OH_AudioStreamBuilder_Destroy, OH_AudioStreamBuilder_GenerateCapturer,
     OH_AudioStreamBuilder_GenerateRenderer, OH_AudioStreamBuilder_SetCapturerCallback,
     OH_AudioStreamBuilder_SetCapturerInfo, OH_AudioStreamBuilder_SetChannelCount,
@@ -157,6 +159,7 @@ pub struct OhosBackend {
     state: Option<Arc<StateCell>>,
     broken: Arc<AtomicBool>,
     stream: Option<*mut OH_AudioRenderer>,
+    callback_data: Option<*mut c_void>,
 }
 
 impl OhosBackend {
@@ -166,6 +169,7 @@ impl OhosBackend {
             state: None,
             broken: Arc::default(),
             stream: None,
+            callback_data: None,
         }
     }
 
@@ -181,6 +185,9 @@ impl Backend for OhosBackend {
     }
 
     fn start(&mut self) -> Result<()> {
+        if self.stream.is_some() {
+            self.close()?;
+        }
         unsafe {
             let mut builder: *mut OH_AudioStreamBuilder = ptr::null_mut();
             let channels = self.settings.channels as i32;
@@ -225,13 +232,25 @@ impl Backend for OhosBackend {
 
             OH_AudioStreamBuilder_SetRendererCallback(builder, callbacks, user_data);
             let mut renderer: *mut OH_AudioRenderer = ptr::null_mut();
-            OH_AudioStreamBuilder_GenerateRenderer(builder, &mut renderer);
+            let result = OH_AudioStreamBuilder_GenerateRenderer(builder, &mut renderer);
             OH_AudioStreamBuilder_Destroy(builder);
+            if result != 0 || renderer.is_null() {
+                drop(Box::from_raw(user_data as *mut OhosCallbackData));
+                return Err(anyhow!(
+                    "OH_AudioStreamBuilder_GenerateRenderer failed: {result}"
+                ));
+            }
             let mut actual_sample_rate: i32 = 0;
             OH_AudioRenderer_GetSamplingRate(renderer, &mut actual_sample_rate);
             self.state.as_ref().unwrap().get().0.sample_rate = actual_sample_rate as u32;
-            OH_AudioRenderer_Start(renderer);
+            let start_result = OH_AudioRenderer_Start(renderer);
+            if start_result != 0 {
+                let _ = OH_AudioRenderer_Release(renderer);
+                drop(Box::from_raw(user_data as *mut OhosCallbackData));
+                return Err(anyhow!("OH_AudioRenderer_Start failed: {start_result}"));
+            }
             self.stream = Some(renderer);
+            self.callback_data = Some(user_data);
             Ok(())
         }
     }
@@ -239,7 +258,13 @@ impl Backend for OhosBackend {
     fn close(&mut self) -> Result<()> {
         if let Some(renderer) = self.stream.take() {
             unsafe {
+                let _ = OH_AudioRenderer_Stop(renderer);
                 OH_AudioRenderer_Release(renderer);
+            }
+        }
+        if let Some(data) = self.callback_data.take() {
+            unsafe {
+                drop(Box::from_raw(data as *mut OhosCallbackData));
             }
         }
         Ok(())
@@ -387,6 +412,7 @@ pub struct OhosRecorderBackend {
     state: Option<Arc<RecorderStateCell>>,
     broken: Arc<AtomicBool>,
     stream: Option<*mut OH_AudioCapturer>,
+    callback_data: Option<*mut c_void>,
 }
 
 impl OhosRecorderBackend {
@@ -396,6 +422,7 @@ impl OhosRecorderBackend {
             state: None,
             broken: Arc::default(),
             stream: None,
+            callback_data: None,
         }
     }
 
@@ -411,6 +438,9 @@ impl RecorderBackend for OhosRecorderBackend {
     }
 
     fn start(&mut self) -> Result<()> {
+        if self.stream.is_some() {
+            self.close()?;
+        }
         unsafe {
             let mut builder: *mut OH_AudioStreamBuilder = ptr::null_mut();
             let sample_rate = self.settings.sample_rate.unwrap_or(48000) as i32;
@@ -454,8 +484,14 @@ impl RecorderBackend for OhosRecorderBackend {
 
             OH_AudioStreamBuilder_SetCapturerCallback(builder, callbacks, user_data);
             let mut capturer: *mut OH_AudioCapturer = ptr::null_mut();
-            OH_AudioStreamBuilder_GenerateCapturer(builder, &mut capturer);
+            let result = OH_AudioStreamBuilder_GenerateCapturer(builder, &mut capturer);
             OH_AudioStreamBuilder_Destroy(builder);
+            if result != 0 || capturer.is_null() {
+                drop(Box::from_raw(user_data as *mut OhosRecorderCallbackData));
+                return Err(anyhow!(
+                    "OH_AudioStreamBuilder_GenerateCapturer failed: {result}"
+                ));
+            }
             let mut actual_sample_rate: i32 = 0;
             OH_AudioCapturer_GetSamplingRate(capturer, &mut actual_sample_rate);
             self.state
@@ -464,8 +500,14 @@ impl RecorderBackend for OhosRecorderBackend {
                 .get()
                 .0
                 .sample_rate = actual_sample_rate as u32;
-            OH_AudioCapturer_Start(capturer);
+            let start_result = OH_AudioCapturer_Start(capturer);
+            if start_result != 0 {
+                let _ = OH_AudioCapturer_Release(capturer);
+                drop(Box::from_raw(user_data as *mut OhosRecorderCallbackData));
+                return Err(anyhow!("OH_AudioCapturer_Start failed: {start_result}"));
+            }
             self.stream = Some(capturer);
+            self.callback_data = Some(user_data);
             Ok(())
         }
     }
@@ -473,7 +515,13 @@ impl RecorderBackend for OhosRecorderBackend {
     fn close(&mut self) -> Result<()> {
         if let Some(capturer) = self.stream.take() {
             unsafe {
+                let _ = OH_AudioCapturer_Stop(capturer);
                 OH_AudioCapturer_Release(capturer);
+            }
+        }
+        if let Some(data) = self.callback_data.take() {
+            unsafe {
+                drop(Box::from_raw(data as *mut OhosRecorderCallbackData));
             }
         }
         Ok(())
