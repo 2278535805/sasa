@@ -133,13 +133,19 @@ impl AudioManager {
 
     pub fn create_sfx(&mut self, clip: AudioClip, buffer_size: Option<usize>) -> Result<Sfx> {
         let (sfx, sfx_renderer) = Sfx::new(clip, buffer_size);
-        self.add_renderer(sfx_renderer)?;
+        self.prod
+            .push(RenderMixerCommand::AddSfxRenderer(Box::new(sfx_renderer)))
+            .map_err(buffer_is_full)
+            .context("add sfx renderer")?;
         Ok(sfx)
     }
 
     pub fn create_music(&mut self, clip: AudioClip, settings: MusicParams) -> Result<Music> {
         let (music, music_renderer) = Music::new(clip, settings);
-        self.add_renderer(music_renderer)?;
+        self.prod
+            .push(RenderMixerCommand::AddMusicRenderer(Box::new(music_renderer)))
+            .map_err(buffer_is_full)
+            .context("add music renderer")?;
         Ok(music)
     }
 

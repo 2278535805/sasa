@@ -3,11 +3,15 @@ use crate::{Renderer, Recorder};
 
 pub(crate) enum RenderMixerCommand {
     AddRenderer(Box<dyn Renderer>),
+    AddMusicRenderer(Box<dyn Renderer>),
+    AddSfxRenderer(Box<dyn Renderer>),
 }
 pub(crate) struct Mixer {
     pub(crate) sample_rate: u32,
 
     renderers: Vec<Box<dyn Renderer>>,
+    music_renderers: Vec<Box<dyn Renderer>>,
+    sfx_renderers: Vec<Box<dyn Renderer>>,
     cons: HeapConsumer<RenderMixerCommand>,
 }
 
@@ -17,6 +21,8 @@ impl Mixer {
             sample_rate,
 
             renderers: Vec::new(),
+            music_renderers: Vec::new(),
+            sfx_renderers: Vec::new(),
             cons,
         }
     }
@@ -25,6 +31,9 @@ impl Mixer {
         for cmd in self.cons.pop_iter() {
             match cmd {
                 RenderMixerCommand::AddRenderer(renderer) => self.renderers.push(renderer),
+                RenderMixerCommand::AddMusicRenderer(renderer) => self.music_renderers.push(renderer),
+                RenderMixerCommand::AddSfxRenderer(renderer) => self.sfx_renderers.push(renderer),
+
             }
         }
     }
@@ -37,6 +46,14 @@ impl Mixer {
             renderer.render_mono(self.sample_rate, data);
             renderer.alive()
         });
+        self.music_renderers.retain_mut(|renderer| {
+            renderer.render_mono(self.sample_rate, data);
+            renderer.alive()
+        });
+        self.sfx_renderers.retain_mut(|renderer| {
+            renderer.render_mono(self.sample_rate, data);
+            renderer.alive()
+        });
     }
 
     pub fn render_stereo(&mut self, data: &mut [f32]) {
@@ -44,6 +61,14 @@ impl Mixer {
         data.fill(0.);
 
         self.renderers.retain_mut(|renderer| {
+            renderer.render_stereo(self.sample_rate, data);
+            renderer.alive()
+        });
+        self.music_renderers.retain_mut(|renderer| {
+            renderer.render_stereo(self.sample_rate, data);
+            renderer.alive()
+        });
+        self.sfx_renderers.retain_mut(|renderer| {
             renderer.render_stereo(self.sample_rate, data);
             renderer.alive()
         });
