@@ -9,7 +9,7 @@ pub use clip::AudioClip;
 mod mixer;
 
 mod renderer;
-pub use renderer::{Music, MusicParams, PlaySfxParams, Renderer, Sfx};
+pub use renderer::{Music, MusicClock, MusicParams, PlaySfxParams, Renderer, Sfx};
 
 pub mod recorder;
 pub use recorder::{Recorder, Record};

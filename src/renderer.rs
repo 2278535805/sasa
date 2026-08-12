@@ -1,5 +1,5 @@
 mod music;
-pub use music::{Music, MusicParams};
+pub use music::{Music, MusicClock, MusicParams};
 
 mod sfx;
 pub use sfx::{Sfx, PlaySfxParams};

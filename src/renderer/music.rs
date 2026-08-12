@@ -25,14 +25,22 @@ impl Default for MusicParams {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct MusicClock(Arc<AtomicF64>);
+impl MusicClock {
+    pub(crate) fn load(&self) -> f64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 struct SharedState {
-    position: AtomicF64,
+    position: Arc<AtomicF64>,
     paused: AtomicBool,
 }
 impl Default for SharedState {
     fn default() -> Self {
         Self {
-            position: AtomicF64::default(),
+            position: Arc::default(),
             paused: AtomicBool::new(true),
         }
     }
@@ -325,5 +333,9 @@ impl Music {
 
     pub fn position(&self) -> f64 {
         self.arc.position.load(Ordering::SeqCst)
+    }
+
+    pub fn clock(&self) -> MusicClock {
+        MusicClock(Arc::clone(&self.arc.position))
     }
 }
