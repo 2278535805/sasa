@@ -96,7 +96,7 @@ impl Renderer for SfxRenderer {
 
     fn render_stereo(&mut self, sample_rate: u32, data: &mut [f32]) {
         let delta = 1. / sample_rate as f64;
-        self.prepare(data.len() as f64 * delta);
+        self.prepare(data.len() as f64 / 2. * delta);
         let mut pop_count = 0;
         self.buffer.resize(data.len(), 0.0);
         for (position, params) in self.active_cons.iter_mut() {
@@ -170,10 +170,10 @@ impl Sfx {
 
     /// Schedule a list of playback times (in seconds, relative to the bound clock).
     ///
-    /// The `times` slice MUST be sorted in ascending order and must not contain
-    /// timestamps earlier than already scheduled ones, because batches are
-    /// appended to the pending queue without reordering.
-    /// Timestamps in the past fire immediately once the clock reaches them.
+    /// The `times` slice MUST be sorted in ascending order, since the pending
+    /// queue is drained from the front. Calling this replaces any previously
+    /// scheduled times. Timestamps earlier than the current clock position are
+    /// discarded instead of being played.
     pub fn schedule_play(&mut self, times: &[f64], params: PlaySfxParams) -> Result<()> {
         if self.clock.is_none() {
             return Err(anyhow!("bind a clock via set_clock before scheduling"));
