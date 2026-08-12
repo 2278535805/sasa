@@ -54,8 +54,9 @@ impl SfxRenderer {
                 if time > now {
                     break;
                 }
-                if let Some((_, params)) = self.scheduled.pop_front() {
-                    let _ = self.active_prod.push((0., params));
+                if let Some((time, params)) = self.scheduled.pop_front() {
+                    let delay = (time - now + buffer_time).max(0.);
+                    let _ = self.active_prod.push((-delay, params));
                 }
             }
         }
@@ -77,6 +78,10 @@ impl Renderer for SfxRenderer {
         self.buffer.resize(data.len(), 0.0);
         for (position, params) in self.active_cons.iter_mut() {
             for sample in self.buffer.iter_mut() {
+                if *position < 0. {
+                    *position += delta;
+                    continue;
+                }
                 if let Some(frame) = self.clip.sample(*position) {
                     *sample += frame.avg() * params.amplifier;
                 } else {
@@ -101,6 +106,10 @@ impl Renderer for SfxRenderer {
         self.buffer.resize(data.len(), 0.0);
         for (position, params) in self.active_cons.iter_mut() {
             for sample in self.buffer.chunks_exact_mut(2) {
+                if *position < 0. {
+                    *position += delta;
+                    continue;
+                }
                 if let Some(frame) = self.clip.sample(*position) {
                     sample[0] += frame.0 * params.amplifier;
                     sample[1] += frame.1 * params.amplifier;
