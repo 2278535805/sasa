@@ -25,11 +25,18 @@ impl Default for MusicParams {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct MusicClock(Arc<AtomicF64>);
+#[derive(Clone)]
+pub struct MusicClock {
+    position: Arc<AtomicF64>,
+    rate: f64,
+}
 impl MusicClock {
-    pub(crate) fn load(&self) -> f64 {
-        self.0.load(Ordering::SeqCst)
+    pub(crate) fn position(&self) -> f64 {
+        self.position.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn rate(&self) -> f64 {
+        self.rate
     }
 }
 
@@ -256,11 +263,13 @@ impl Renderer for MusicRenderer {
 pub struct Music {
     arc: Arc<SharedState>,
     prod: HeapProducer<MusicCommand>,
+    rate: f64,
 }
 impl Music {
     pub(crate) fn new(clip: AudioClip, settings: MusicParams) -> (Music, MusicRenderer) {
         let (prod, cons) = HeapRb::new(settings.command_buffer_size).split();
         let arc = Arc::default();
+        let rate = settings.playback_rate;
         let renderer = MusicRenderer {
             clip,
             settings,
@@ -275,7 +284,14 @@ impl Music {
             fade_time: 0,
             fade_current: 0,
         };
-        (Self { arc, prod }, renderer)
+        (
+            Self {
+                arc,
+                prod,
+                rate,
+            },
+            renderer,
+        )
     }
 
     pub fn play(&mut self) -> Result<()> {
@@ -336,6 +352,9 @@ impl Music {
     }
 
     pub fn clock(&self) -> MusicClock {
-        MusicClock(Arc::clone(&self.arc.position))
+        MusicClock {
+            position: Arc::clone(&self.arc.position),
+            rate: self.rate,
+        }
     }
 }

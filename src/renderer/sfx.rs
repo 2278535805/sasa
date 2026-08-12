@@ -45,9 +45,10 @@ impl SfxRenderer {
             }
         }
         if let Some(clock) = &self.clock {
-            let now = clock.load();
+            let now = clock.position();
+            let window = clock.rate() * buffer_time;
             while let Some(&(time, _)) = self.scheduled.front() {
-                if time < now - buffer_time {
+                if time < now - window {
                     let _ = self.scheduled.pop_front();
                     continue;
                 }
@@ -55,7 +56,7 @@ impl SfxRenderer {
                     break;
                 }
                 if let Some((time, params)) = self.scheduled.pop_front() {
-                    let delay = (time - now + buffer_time).max(0.);
+                    let delay = ((time - now + window) / clock.rate()).max(0.);
                     let _ = self.active_prod.push((-delay, params));
                 }
             }
