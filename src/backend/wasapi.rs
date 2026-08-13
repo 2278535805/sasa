@@ -297,12 +297,10 @@ impl std::fmt::Display for WasapiStreamInfo {
     }
 }
 
-pub struct WasapiBackend {
-    settings: WasapiSettings,
-    state: Option<Arc<StateCell>>,
+#[derive(Clone, Default)]
+struct WasapiSharedState {
     broken: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
-    join_handle: Option<JoinHandle<()>>,
     sample_rate: Arc<AtomicU32>,
     channels: Arc<AtomicU32>,
     actual_frames: Arc<AtomicU32>,
@@ -322,58 +320,27 @@ pub struct WasapiBackend {
     clock_frequency: Arc<AtomicU64>,
     adapter_name: Arc<Mutex<Option<String>>>,
 }
+
+pub struct WasapiBackend {
+    settings: WasapiSettings,
+    state: Option<Arc<StateCell>>,
+    shared: WasapiSharedState,
+    join_handle: Option<JoinHandle<()>>,
+}
 impl WasapiBackend {
     pub fn new(settings: WasapiSettings) -> Self {
         Self {
             settings,
             state: None,
-            broken: Arc::default(),
-            running: Arc::default(),
+            shared: WasapiSharedState::default(),
             join_handle: None,
-            sample_rate: Arc::default(),
-            channels: Arc::default(),
-            actual_frames: Arc::default(),
-            device_name: Arc::default(),
-            default_period_hns: Arc::default(),
-            min_period_hns: Arc::default(),
-            min_aligned_period_hns: Arc::default(),
-            actual_bits: Arc::default(),
-            actual_valid_bits: Arc::default(),
-            actual_sample_type: Arc::default(),
-            actual_period_hns: Arc::default(),
-            buffer_size_frames: Arc::default(),
-            channel_mask: Arc::default(),
-            current_padding: Arc::default(),
-            available_space: Arc::default(),
-            clock_position: Arc::default(),
-            clock_frequency: Arc::default(),
-            adapter_name: Arc::default(),
         }
     }
 
     fn run_playback(
         settings: WasapiSettings,
         state: Arc<StateCell>,
-        broken: Arc<AtomicBool>,
-        running: Arc<AtomicBool>,
-        actual_frames: Arc<AtomicU32>,
-        sample_rate: Arc<AtomicU32>,
-        channels: Arc<AtomicU32>,
-        device_name: Arc<Mutex<Option<String>>>,
-        default_period_hns: Arc<AtomicU32>,
-        min_period_hns: Arc<AtomicU32>,
-        min_aligned_period_hns: Arc<AtomicU32>,
-        actual_bits: Arc<AtomicU32>,
-        actual_valid_bits: Arc<AtomicU32>,
-        actual_sample_type: Arc<Mutex<Option<String>>>,
-        actual_period_hns: Arc<AtomicU32>,
-        buffer_size_frames: Arc<AtomicU32>,
-        channel_mask: Arc<AtomicU32>,
-        current_padding: Arc<AtomicU32>,
-        available_space: Arc<AtomicU32>,
-        clock_position: Arc<AtomicU64>,
-        clock_frequency: Arc<AtomicU64>,
-        adapter_name: Arc<Mutex<Option<String>>>,
+        shared: WasapiSharedState,
     ) -> Result<()> {
         let _ = initialize_mta().ok();
 
@@ -382,8 +349,8 @@ impl WasapiBackend {
             .get_default_device(&Direction::Render)
             .context("get default output device")?;
         let dev_name = device.get_friendlyname().ok();
-        *device_name.lock().unwrap() = dev_name;
-        *adapter_name.lock().unwrap() = device.get_interface_friendlyname().ok();
+        *shared.device_name.lock().unwrap() = dev_name;
+        *shared.adapter_name.lock().unwrap() = device.get_interface_friendlyname().ok();
 
         let mix_format = if settings.sample_rate.is_none() || settings.channels.is_none() {
             let client = device
@@ -457,27 +424,27 @@ impl WasapiBackend {
         let actual_ch_u32 = actual_ch as u32;
 
         if let Ok((def_per, min_per)) = audio_client.get_device_period() {
-            default_period_hns.store(def_per as u32, Ordering::Relaxed);
-            min_period_hns.store(min_per as u32, Ordering::Relaxed);
+            shared.default_period_hns.store(def_per as u32, Ordering::Relaxed);
+            shared.min_period_hns.store(min_per as u32, Ordering::Relaxed);
         }
-        actual_period_hns.store(mode_period_hns(&mode), Ordering::Relaxed);
+        shared.actual_period_hns.store(mode_period_hns(&mode), Ordering::Relaxed);
         if let Ok(aligned_min) =
             audio_client.calculate_aligned_period_near(0, Some(128), &actual_format)
         {
-            min_aligned_period_hns.store(aligned_min as u32, Ordering::Relaxed);
+            shared.min_aligned_period_hns.store(aligned_min as u32, Ordering::Relaxed);
         }
-        actual_bits.store(actual_format.get_bitspersample() as u32, Ordering::Relaxed);
-        actual_valid_bits.store(actual_format.get_validbitspersample() as u32, Ordering::Relaxed);
-        channel_mask.store(actual_format.get_dwchannelmask(), Ordering::Relaxed);
-        buffer_size_frames.store(audio_client.get_buffer_size().unwrap_or(0), Ordering::Relaxed);
-        *actual_sample_type.lock().unwrap() = match actual_format.get_subformat() {
+        shared.actual_bits.store(actual_format.get_bitspersample() as u32, Ordering::Relaxed);
+        shared.actual_valid_bits.store(actual_format.get_validbitspersample() as u32, Ordering::Relaxed);
+        shared.channel_mask.store(actual_format.get_dwchannelmask(), Ordering::Relaxed);
+        shared.buffer_size_frames.store(audio_client.get_buffer_size().unwrap_or(0), Ordering::Relaxed);
+        *shared.actual_sample_type.lock().unwrap() = match actual_format.get_subformat() {
             Ok(SampleType::Float) => Some("Float".into()),
             Ok(SampleType::Int) => Some("Int".into()),
             Err(_) => None,
         };
 
-        sample_rate.store(actual_sr, Ordering::Relaxed);
-        channels.store(actual_ch_u32, Ordering::Relaxed);
+        shared.sample_rate.store(actual_sr, Ordering::Relaxed);
+        shared.channels.store(actual_ch_u32, Ordering::Relaxed);
         state.get().0.sample_rate = actual_sr;
 
         let h_event = audio_client
@@ -489,7 +456,7 @@ impl WasapiBackend {
         let audio_clock = audio_client.get_audioclock().ok();
         if let Some(ref clock) = audio_clock {
             if let Ok(freq) = clock.get_frequency() {
-                clock_frequency.store(freq, Ordering::Relaxed);
+                shared.clock_frequency.store(freq, Ordering::Relaxed);
             }
         }
 
@@ -500,7 +467,7 @@ impl WasapiBackend {
         let mut loop_result = Ok(());
 
         loop {
-            if !running.load(Ordering::Relaxed) {
+            if !shared.running.load(Ordering::Relaxed) {
                 let _ = audio_client.stop_stream();
                 break;
             }
@@ -511,7 +478,7 @@ impl WasapiBackend {
                 Ok(f) => f,
                 Err(e) => {
                     let _ = audio_client.stop_stream();
-                    broken.store(true, Ordering::Relaxed);
+                    shared.broken.store(true, Ordering::Relaxed);
                     loop_result = Err(anyhow::anyhow!(e));
                     break;
                 }
@@ -520,14 +487,14 @@ impl WasapiBackend {
             if buffer_frames == 0 {
                 if h_event.wait_for_event(100).is_err() {
                     let _ = audio_client.stop_stream();
-                    broken.store(true, Ordering::Relaxed);
+                    shared.broken.store(true, Ordering::Relaxed);
                     loop_result = Err(anyhow::anyhow!("event wait timeout"));
                     break;
                 }
                 continue;
             }
 
-            actual_frames.store(buffer_frames, Ordering::Relaxed);
+            shared.actual_frames.store(buffer_frames, Ordering::Relaxed);
 
             let n_samples = buffer_frames as usize * actual_ch as usize;
             f32_buf.resize(n_samples, 0f32);
@@ -545,17 +512,17 @@ impl WasapiBackend {
 
             if let Err(e) = render_client.write_to_device(buffer_frames as usize, &byte_buf, None) {
                 let _ = audio_client.stop_stream();
-                broken.store(true, Ordering::Relaxed);
+                shared.broken.store(true, Ordering::Relaxed);
                 loop_result = Err(anyhow::anyhow!(e));
                 break;
             }
 
             let post_padding = audio_client.get_current_padding().unwrap_or(0);
-            current_padding.store(post_padding, Ordering::Relaxed);
-            available_space.store(buffer_frames, Ordering::Relaxed);
+            shared.current_padding.store(post_padding, Ordering::Relaxed);
+            shared.available_space.store(buffer_frames, Ordering::Relaxed);
             if let Some(ref clock) = audio_clock {
                 if let Ok((pos, _timer)) = clock.get_position() {
-                    clock_position.store(pos, Ordering::Relaxed);
+                    shared.clock_position.store(pos, Ordering::Relaxed);
                 }
             }
 
@@ -569,7 +536,7 @@ impl WasapiBackend {
 
             if h_event.wait_for_event(1000).is_err() {
                 let _ = audio_client.stop_stream();
-                broken.store(true, Ordering::Relaxed);
+                shared.broken.store(true, Ordering::Relaxed);
                 loop_result = Err(anyhow::anyhow!("event wait timeout"));
                 break;
             }
@@ -588,57 +555,15 @@ impl Backend for WasapiBackend {
     fn start(&mut self) -> Result<()> {
         let settings = self.settings.clone();
         let state = Arc::clone(self.state.as_ref().context("not set up")?);
-        let broken = Arc::clone(&self.broken);
-        let handle_broken = Arc::clone(&self.broken);
-        let running = Arc::clone(&self.running);
-        let actual_frames = Arc::clone(&self.actual_frames);
-        let sample_rate = Arc::clone(&self.sample_rate);
-        let channels = Arc::clone(&self.channels);
-        let device_name = Arc::clone(&self.device_name);
-        let default_period_hns = Arc::clone(&self.default_period_hns);
-        let min_period_hns = Arc::clone(&self.min_period_hns);
-        let min_aligned_period_hns = Arc::clone(&self.min_aligned_period_hns);
-        let actual_bits = Arc::clone(&self.actual_bits);
-        let actual_sample_type = Arc::clone(&self.actual_sample_type);
-        let actual_period_hns = Arc::clone(&self.actual_period_hns);
-        let actual_valid_bits = Arc::clone(&self.actual_valid_bits);
-        let buffer_size_frames = Arc::clone(&self.buffer_size_frames);
-        let channel_mask = Arc::clone(&self.channel_mask);
-        let current_padding = Arc::clone(&self.current_padding);
-        let available_space = Arc::clone(&self.available_space);
-        let clock_position = Arc::clone(&self.clock_position);
-        let clock_frequency = Arc::clone(&self.clock_frequency);
-        let adapter_name = Arc::clone(&self.adapter_name);
+        let shared = self.shared.clone();
+        let handle_broken = Arc::clone(&shared.broken);
 
-        running.store(true, Ordering::Relaxed);
+        shared.running.store(true, Ordering::Relaxed);
 
         let join_handle = std::thread::Builder::new()
             .name("wasapi-playback".into())
             .spawn(move || {
-                if WasapiBackend::run_playback(
-                    settings,
-                    state,
-                    broken,
-                    running,
-                    actual_frames,
-                    sample_rate,
-                    channels,
-                    device_name,
-                    default_period_hns,
-                    min_period_hns,
-                    min_aligned_period_hns,
-                    actual_bits,
-                    actual_valid_bits,
-                    actual_sample_type,
-                    actual_period_hns,
-                    buffer_size_frames,
-                    channel_mask,
-                    current_padding,
-                    available_space,
-                    clock_position,
-                    clock_frequency,
-                    adapter_name,
-                ).is_err() {
+                if WasapiBackend::run_playback(settings, state, shared).is_err() {
                     handle_broken.store(true, Ordering::Relaxed);
                 };
             })
@@ -649,7 +574,7 @@ impl Backend for WasapiBackend {
     }
 
     fn close(&mut self) -> Result<()> {
-        self.running.store(false, Ordering::Relaxed);
+        self.shared.running.store(false, Ordering::Relaxed);
         if let Some(handle) = self.join_handle.take() {
             let _ = handle.join();
         }
@@ -657,71 +582,71 @@ impl Backend for WasapiBackend {
     }
 
     fn consume_broken(&self) -> bool {
-        self.broken.fetch_and(false, Ordering::Relaxed)
+        self.shared.broken.fetch_and(false, Ordering::Relaxed)
     }
 
     fn stream_info(&mut self) -> BackendStreamInfo {
-        let frames = self.actual_frames.load(Ordering::Relaxed);
+        let frames = self.shared.actual_frames.load(Ordering::Relaxed);
         BackendStreamInfo::Wasapi(WasapiStreamInfo {
             settings: self.settings.clone(),
             sample_rate: {
-                let sr = self.sample_rate.load(Ordering::Relaxed);
+                let sr = self.shared.sample_rate.load(Ordering::Relaxed);
                 if sr > 0 { Some(sr) } else { None }
             },
             channels: {
-                let ch = self.channels.load(Ordering::Relaxed);
+                let ch = self.shared.channels.load(Ordering::Relaxed);
                 if ch > 0 { Some(ch as u16) } else { None }
             },
-            device_name: self.device_name.lock().unwrap().clone(),
+            device_name: self.shared.device_name.lock().unwrap().clone(),
             actual_frames_per_callback: if frames > 0 { Some(frames) } else { None },
             default_period_hns: {
-                let v = self.default_period_hns.load(Ordering::Relaxed);
+                let v = self.shared.default_period_hns.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             min_period_hns: {
-                let v = self.min_period_hns.load(Ordering::Relaxed);
+                let v = self.shared.min_period_hns.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             min_aligned_period_hns: {
-                let v = self.min_aligned_period_hns.load(Ordering::Relaxed);
+                let v = self.shared.min_aligned_period_hns.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             actual_bits_per_sample: {
-                let v = self.actual_bits.load(Ordering::Relaxed);
+                let v = self.shared.actual_bits.load(Ordering::Relaxed);
                 if v > 0 { Some(v as u16) } else { None }
             },
             actual_valid_bits_per_sample: {
-                let v = self.actual_valid_bits.load(Ordering::Relaxed);
+                let v = self.shared.actual_valid_bits.load(Ordering::Relaxed);
                 if v > 0 { Some(v as u16) } else { None }
             },
-            actual_sample_type: self.actual_sample_type.lock().unwrap().clone(),
+            actual_sample_type: self.shared.actual_sample_type.lock().unwrap().clone(),
             actual_period_hns: {
-                let v = self.actual_period_hns.load(Ordering::Relaxed);
+                let v = self.shared.actual_period_hns.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             buffer_size_frames: {
-                let v = self.buffer_size_frames.load(Ordering::Relaxed);
+                let v = self.shared.buffer_size_frames.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             channel_mask: {
-                let v = self.channel_mask.load(Ordering::Relaxed);
+                let v = self.shared.channel_mask.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
-            adapter_name: self.adapter_name.lock().unwrap().clone(),
+            adapter_name: self.shared.adapter_name.lock().unwrap().clone(),
             current_padding: {
-                let v = self.current_padding.load(Ordering::Relaxed);
+                let v = self.shared.current_padding.load(Ordering::Relaxed);
                 Some(v)
             },
             available_space: {
-                let v = self.available_space.load(Ordering::Relaxed);
+                let v = self.shared.available_space.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             clock_position: {
-                let v = self.clock_position.load(Ordering::Relaxed);
+                let v = self.shared.clock_position.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             clock_frequency: {
-                let v = self.clock_frequency.load(Ordering::Relaxed);
+                let v = self.shared.clock_frequency.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
         })
@@ -737,27 +662,8 @@ impl Drop for WasapiBackend {
 pub struct WasapiRecorderBackend {
     settings: WasapiSettings,
     state: Option<Arc<RecorderStateCell>>,
-    broken: Arc<AtomicBool>,
-    running: Arc<AtomicBool>,
+    shared: WasapiSharedState,
     join_handle: Option<JoinHandle<()>>,
-    sample_rate: Arc<AtomicU32>,
-    channels: Arc<AtomicU32>,
-    actual_frames: Arc<AtomicU32>,
-    device_name: Arc<Mutex<Option<String>>>,
-    default_period_hns: Arc<AtomicU32>,
-    min_period_hns: Arc<AtomicU32>,
-    min_aligned_period_hns: Arc<AtomicU32>,
-    actual_bits: Arc<AtomicU32>,
-    actual_valid_bits: Arc<AtomicU32>,
-    actual_sample_type: Arc<Mutex<Option<String>>>,
-    actual_period_hns: Arc<AtomicU32>,
-    buffer_size_frames: Arc<AtomicU32>,
-    channel_mask: Arc<AtomicU32>,
-    current_padding: Arc<AtomicU32>,
-    available_space: Arc<AtomicU32>,
-    clock_position: Arc<AtomicU64>,
-    clock_frequency: Arc<AtomicU64>,
-    adapter_name: Arc<Mutex<Option<String>>>,
 }
 
 impl WasapiRecorderBackend {
@@ -765,53 +671,15 @@ impl WasapiRecorderBackend {
         Self {
             settings,
             state: None,
-            broken: Arc::default(),
-            running: Arc::default(),
+            shared: WasapiSharedState::default(),
             join_handle: None,
-            sample_rate: Arc::default(),
-            channels: Arc::default(),
-            actual_frames: Arc::default(),
-            device_name: Arc::default(),
-            default_period_hns: Arc::default(),
-            min_period_hns: Arc::default(),
-            min_aligned_period_hns: Arc::default(),
-            actual_bits: Arc::default(),
-            actual_valid_bits: Arc::default(),
-            actual_sample_type: Arc::default(),
-            actual_period_hns: Arc::default(),
-            buffer_size_frames: Arc::default(),
-            channel_mask: Arc::default(),
-            current_padding: Arc::default(),
-            available_space: Arc::default(),
-            clock_position: Arc::default(),
-            clock_frequency: Arc::default(),
-            adapter_name: Arc::default(),
         }
     }
 
     fn run_capture(
         settings: WasapiSettings,
         state: Arc<RecorderStateCell>,
-        broken: Arc<AtomicBool>,
-        running: Arc<AtomicBool>,
-        actual_frames: Arc<AtomicU32>,
-        sample_rate: Arc<AtomicU32>,
-        channels: Arc<AtomicU32>,
-        device_name: Arc<Mutex<Option<String>>>,
-        default_period_hns: Arc<AtomicU32>,
-        min_period_hns: Arc<AtomicU32>,
-        min_aligned_period_hns: Arc<AtomicU32>,
-        actual_bits: Arc<AtomicU32>,
-        actual_valid_bits: Arc<AtomicU32>,
-        actual_sample_type: Arc<Mutex<Option<String>>>,
-        actual_period_hns: Arc<AtomicU32>,
-        buffer_size_frames: Arc<AtomicU32>,
-        channel_mask: Arc<AtomicU32>,
-        current_padding: Arc<AtomicU32>,
-        available_space: Arc<AtomicU32>,
-        clock_position: Arc<AtomicU64>,
-        clock_frequency: Arc<AtomicU64>,
-        adapter_name: Arc<Mutex<Option<String>>>,
+        shared: WasapiSharedState,
     ) -> Result<()> {
         let _ = initialize_mta().ok();
 
@@ -820,8 +688,8 @@ impl WasapiRecorderBackend {
             .get_default_device(&Direction::Capture)
             .context("get default input device")?;
         let dev_name = device.get_friendlyname().ok();
-        *device_name.lock().unwrap() = dev_name;
-        *adapter_name.lock().unwrap() = device.get_interface_friendlyname().ok();
+        *shared.device_name.lock().unwrap() = dev_name;
+        *shared.adapter_name.lock().unwrap() = device.get_interface_friendlyname().ok();
 
         let mix_format = if settings.sample_rate.is_none() || settings.channels.is_none() {
             let client = device
@@ -894,27 +762,27 @@ impl WasapiRecorderBackend {
         let actual_ch = actual_format.get_nchannels();
 
         if let Ok((def_per, min_per)) = audio_client.get_device_period() {
-            default_period_hns.store(def_per as u32, Ordering::Relaxed);
-            min_period_hns.store(min_per as u32, Ordering::Relaxed);
+            shared.default_period_hns.store(def_per as u32, Ordering::Relaxed);
+            shared.min_period_hns.store(min_per as u32, Ordering::Relaxed);
         }
-        actual_period_hns.store(mode_period_hns(&mode), Ordering::Relaxed);
+        shared.actual_period_hns.store(mode_period_hns(&mode), Ordering::Relaxed);
         if let Ok(aligned_min) =
             audio_client.calculate_aligned_period_near(0, Some(128), &actual_format)
         {
-            min_aligned_period_hns.store(aligned_min as u32, Ordering::Relaxed);
+            shared.min_aligned_period_hns.store(aligned_min as u32, Ordering::Relaxed);
         }
-        actual_bits.store(actual_format.get_bitspersample() as u32, Ordering::Relaxed);
-        actual_valid_bits.store(actual_format.get_validbitspersample() as u32, Ordering::Relaxed);
-        channel_mask.store(actual_format.get_dwchannelmask(), Ordering::Relaxed);
-        buffer_size_frames.store(audio_client.get_buffer_size().unwrap_or(0), Ordering::Relaxed);
-        *actual_sample_type.lock().unwrap() = match actual_format.get_subformat() {
+        shared.actual_bits.store(actual_format.get_bitspersample() as u32, Ordering::Relaxed);
+        shared.actual_valid_bits.store(actual_format.get_validbitspersample() as u32, Ordering::Relaxed);
+        shared.channel_mask.store(actual_format.get_dwchannelmask(), Ordering::Relaxed);
+        shared.buffer_size_frames.store(audio_client.get_buffer_size().unwrap_or(0), Ordering::Relaxed);
+        *shared.actual_sample_type.lock().unwrap() = match actual_format.get_subformat() {
             Ok(SampleType::Float) => Some("Float".into()),
             Ok(SampleType::Int) => Some("Int".into()),
             Err(_) => None,
         };
 
-        sample_rate.store(actual_sr, Ordering::Relaxed);
-        channels.store(actual_ch as u32, Ordering::Relaxed);
+        shared.sample_rate.store(actual_sr, Ordering::Relaxed);
+        shared.channels.store(actual_ch as u32, Ordering::Relaxed);
         state.get().0.sample_rate = actual_sr;
 
         let h_event = audio_client
@@ -926,7 +794,7 @@ impl WasapiRecorderBackend {
         let audio_clock = audio_client.get_audioclock().ok();
         if let Some(ref clock) = audio_clock {
             if let Ok(freq) = clock.get_frequency() {
-                clock_frequency.store(freq, Ordering::Relaxed);
+                shared.clock_frequency.store(freq, Ordering::Relaxed);
             }
         }
 
@@ -939,7 +807,7 @@ impl WasapiRecorderBackend {
         let mut loop_result = Ok(());
 
         loop {
-            if !running.load(Ordering::Relaxed) {
+            if !shared.running.load(Ordering::Relaxed) {
                 let _ = audio_client.stop_stream();
                 break;
             }
@@ -950,7 +818,7 @@ impl WasapiRecorderBackend {
                 Ok(v) => v,
                 Err(e) => {
                     let _ = audio_client.stop_stream();
-                    broken.store(true, Ordering::Relaxed);
+                    shared.broken.store(true, Ordering::Relaxed);
                     loop_result = Err(anyhow::anyhow!(e));
                     break;
                 }
@@ -959,14 +827,14 @@ impl WasapiRecorderBackend {
             if nbr_frames == 0 {
                 if h_event.wait_for_event(100).is_err() {
                     let _ = audio_client.stop_stream();
-                    broken.store(true, Ordering::Relaxed);
+                    shared.broken.store(true, Ordering::Relaxed);
                     loop_result = Err(anyhow::anyhow!("event wait timeout"));
                     break;
                 }
                 continue;
             }
 
-            actual_frames.store(nbr_frames, Ordering::Relaxed);
+            shared.actual_frames.store(nbr_frames, Ordering::Relaxed);
 
             let n_samples = nbr_frames as usize * actual_ch as usize;
             f32_buf.resize(n_samples, 0f32);
@@ -980,11 +848,11 @@ impl WasapiRecorderBackend {
             }
 
             let post_padding = audio_client.get_current_padding().unwrap_or(0);
-            current_padding.store(post_padding, Ordering::Relaxed);
-            available_space.store(nbr_frames, Ordering::Relaxed);
+            shared.current_padding.store(post_padding, Ordering::Relaxed);
+            shared.available_space.store(nbr_frames, Ordering::Relaxed);
             if let Some(ref clock) = audio_clock {
                 if let Ok((pos, _timer)) = clock.get_position() {
-                    clock_position.store(pos, Ordering::Relaxed);
+                    shared.clock_position.store(pos, Ordering::Relaxed);
                 }
             }
 
@@ -998,7 +866,7 @@ impl WasapiRecorderBackend {
 
             if h_event.wait_for_event(1000).is_err() {
                 let _ = audio_client.stop_stream();
-                broken.store(true, Ordering::Relaxed);
+                shared.broken.store(true, Ordering::Relaxed);
                 loop_result = Err(anyhow::anyhow!("event wait timeout"));
                 break;
             }
@@ -1017,57 +885,15 @@ impl RecorderBackend for WasapiRecorderBackend {
     fn start(&mut self) -> Result<()> {
         let settings = self.settings.clone();
         let state = Arc::clone(self.state.as_ref().context("not set up")?);
-        let broken = Arc::clone(&self.broken);
-        let handle_broken = Arc::clone(&broken);
-        let running = Arc::clone(&self.running);
-        let actual_frames = Arc::clone(&self.actual_frames);
-        let sample_rate = Arc::clone(&self.sample_rate);
-        let channels = Arc::clone(&self.channels);
-        let device_name = Arc::clone(&self.device_name);
-        let default_period_hns = Arc::clone(&self.default_period_hns);
-        let min_period_hns = Arc::clone(&self.min_period_hns);
-        let min_aligned_period_hns = Arc::clone(&self.min_aligned_period_hns);
-        let actual_bits = Arc::clone(&self.actual_bits);
-        let actual_sample_type = Arc::clone(&self.actual_sample_type);
-        let actual_period_hns = Arc::clone(&self.actual_period_hns);
-        let actual_valid_bits = Arc::clone(&self.actual_valid_bits);
-        let buffer_size_frames = Arc::clone(&self.buffer_size_frames);
-        let channel_mask = Arc::clone(&self.channel_mask);
-        let current_padding = Arc::clone(&self.current_padding);
-        let available_space = Arc::clone(&self.available_space);
-        let clock_position = Arc::clone(&self.clock_position);
-        let clock_frequency = Arc::clone(&self.clock_frequency);
-        let adapter_name = Arc::clone(&self.adapter_name);
+        let shared = self.shared.clone();
+        let handle_broken = Arc::clone(&shared.broken);
 
-        running.store(true, Ordering::Relaxed);
+        shared.running.store(true, Ordering::Relaxed);
 
         let join_handle = std::thread::Builder::new()
             .name("wasapi-capture".into())
             .spawn(move || {
-                if WasapiRecorderBackend::run_capture(
-                    settings,
-                    state,
-                    broken,
-                    running,
-                    actual_frames,
-                    sample_rate,
-                    channels,
-                    device_name,
-                    default_period_hns,
-                    min_period_hns,
-                    min_aligned_period_hns,
-                    actual_bits,
-                    actual_valid_bits,
-                    actual_sample_type,
-                    actual_period_hns,
-                    buffer_size_frames,
-                    channel_mask,
-                    current_padding,
-                    available_space,
-                    clock_position,
-                    clock_frequency,
-                    adapter_name,
-                ).is_err() {
+                if WasapiRecorderBackend::run_capture(settings, state, shared).is_err() {
                     handle_broken.store(true, Ordering::Relaxed);
                 }
             })
@@ -1078,7 +904,7 @@ impl RecorderBackend for WasapiRecorderBackend {
     }
 
     fn close(&mut self) -> Result<()> {
-        self.running.store(false, Ordering::Relaxed);
+        self.shared.running.store(false, Ordering::Relaxed);
         if let Some(handle) = self.join_handle.take() {
             let _ = handle.join();
         }
@@ -1086,71 +912,71 @@ impl RecorderBackend for WasapiRecorderBackend {
     }
 
     fn consume_broken(&self) -> bool {
-        self.broken.fetch_and(false, Ordering::Relaxed)
+        self.shared.broken.fetch_and(false, Ordering::Relaxed)
     }
 
     fn stream_info(&mut self) -> BackendStreamInfo {
-        let frames = self.actual_frames.load(Ordering::Relaxed);
+        let frames = self.shared.actual_frames.load(Ordering::Relaxed);
         BackendStreamInfo::Wasapi(WasapiStreamInfo {
             settings: self.settings.clone(),
             sample_rate: {
-                let sr = self.sample_rate.load(Ordering::Relaxed);
+                let sr = self.shared.sample_rate.load(Ordering::Relaxed);
                 if sr > 0 { Some(sr) } else { None }
             },
             channels: {
-                let ch = self.channels.load(Ordering::Relaxed);
+                let ch = self.shared.channels.load(Ordering::Relaxed);
                 if ch > 0 { Some(ch as u16) } else { None }
             },
-            device_name: self.device_name.lock().unwrap().clone(),
+            device_name: self.shared.device_name.lock().unwrap().clone(),
             actual_frames_per_callback: if frames > 0 { Some(frames) } else { None },
             default_period_hns: {
-                let v = self.default_period_hns.load(Ordering::Relaxed);
+                let v = self.shared.default_period_hns.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             min_period_hns: {
-                let v = self.min_period_hns.load(Ordering::Relaxed);
+                let v = self.shared.min_period_hns.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             min_aligned_period_hns: {
-                let v = self.min_aligned_period_hns.load(Ordering::Relaxed);
+                let v = self.shared.min_aligned_period_hns.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             actual_bits_per_sample: {
-                let v = self.actual_bits.load(Ordering::Relaxed);
+                let v = self.shared.actual_bits.load(Ordering::Relaxed);
                 if v > 0 { Some(v as u16) } else { None }
             },
             actual_valid_bits_per_sample: {
-                let v = self.actual_valid_bits.load(Ordering::Relaxed);
+                let v = self.shared.actual_valid_bits.load(Ordering::Relaxed);
                 if v > 0 { Some(v as u16) } else { None }
             },
-            actual_sample_type: self.actual_sample_type.lock().unwrap().clone(),
+            actual_sample_type: self.shared.actual_sample_type.lock().unwrap().clone(),
             actual_period_hns: {
-                let v = self.actual_period_hns.load(Ordering::Relaxed);
+                let v = self.shared.actual_period_hns.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             buffer_size_frames: {
-                let v = self.buffer_size_frames.load(Ordering::Relaxed);
+                let v = self.shared.buffer_size_frames.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             channel_mask: {
-                let v = self.channel_mask.load(Ordering::Relaxed);
+                let v = self.shared.channel_mask.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
-            adapter_name: self.adapter_name.lock().unwrap().clone(),
+            adapter_name: self.shared.adapter_name.lock().unwrap().clone(),
             current_padding: {
-                let v = self.current_padding.load(Ordering::Relaxed);
+                let v = self.shared.current_padding.load(Ordering::Relaxed);
                 Some(v)
             },
             available_space: {
-                let v = self.available_space.load(Ordering::Relaxed);
+                let v = self.shared.available_space.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             clock_position: {
-                let v = self.clock_position.load(Ordering::Relaxed);
+                let v = self.shared.clock_position.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
             clock_frequency: {
-                let v = self.clock_frequency.load(Ordering::Relaxed);
+                let v = self.shared.clock_frequency.load(Ordering::Relaxed);
                 if v > 0 { Some(v) } else { None }
             },
         })
