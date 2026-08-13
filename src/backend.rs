@@ -51,7 +51,7 @@ pub struct BackendSetup {
 }
 
 pub trait Backend {
-    fn setup(&mut self, setup: BackendSetup) -> Result<()>;
+    fn setup(&mut self, setup: BackendSetup);
     fn start(&mut self) -> Result<()>;
     fn close(&mut self) -> Result<()>;
     fn consume_broken(&self) -> bool;

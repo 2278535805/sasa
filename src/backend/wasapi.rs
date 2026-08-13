@@ -547,9 +547,8 @@ impl WasapiBackend {
 }
 
 impl Backend for WasapiBackend {
-    fn setup(&mut self, setup: BackendSetup) -> Result<()> {
+    fn setup(&mut self, setup: BackendSetup) {
         self.state = Some(Arc::new(setup.into()));
-        Ok(())
     }
 
     fn start(&mut self) -> Result<()> {

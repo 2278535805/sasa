@@ -111,23 +111,23 @@ pub struct AudioManager {
 }
 
 impl AudioManager {
-    pub fn new(backend: impl Backend + 'static) -> Result<Self> {
+    pub fn new(backend: impl Backend + 'static) -> Self {
         Self::new_box(Box::new(backend))
     }
 
-    pub fn new_box(mut backend: Box<dyn Backend>) -> Result<Self> {
+    pub fn new_box(mut backend: Box<dyn Backend>) -> Self {
         let (prod, cons) = HeapRb::new(16).split();
         let latency: Arc<AtomicF64> = Arc::default();
         let latency_rec = LatencyRecorder::new(Arc::clone(&latency));
         backend.setup(BackendSetup {
             mixer_cons: cons,
             latency_rec,
-        })?;
-        Ok(Self {
+        });
+        Self {
             backend,
             latency,
             prod,
-        })
+        }
     }
 
     pub fn create_sfx(&mut self, clip: AudioClip, buffer_size: Option<usize>) -> Result<Sfx> {

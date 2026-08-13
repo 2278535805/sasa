@@ -63,9 +63,8 @@ impl CpalBackend {
 }
 
 impl Backend for CpalBackend {
-    fn setup(&mut self, setup: BackendSetup) -> Result<()> {
+    fn setup(&mut self, setup: BackendSetup) {
         self.state = Some(Arc::new(setup.into()));
-        Ok(())
     }
 
     fn start(&mut self) -> Result<()> {
