@@ -123,7 +123,6 @@ impl AudioManager {
             mixer_cons: cons,
             latency_rec,
         })?;
-        backend.start()?;
         Ok(Self {
             backend,
             latency,
