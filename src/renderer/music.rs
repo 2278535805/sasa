@@ -28,13 +28,17 @@ impl Default for MusicParams {
 
 #[derive(Clone)]
 pub struct MusicClock {
-    position: Arc<AtomicF64>,
+    state: Arc<SharedState>,
     rate: f64,
 }
 
 impl MusicClock {
     pub(crate) fn position(&self) -> f64 {
-        self.position.load(Ordering::SeqCst)
+        self.state.position.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn paused(&self) -> bool {
+        self.state.paused.load(Ordering::SeqCst)
     }
 
     pub(crate) fn rate(&self) -> f64 {
@@ -43,14 +47,14 @@ impl MusicClock {
 }
 
 struct SharedState {
-    position: Arc<AtomicF64>,
+    position: AtomicF64,
     paused: AtomicBool,
 }
 
 impl Default for SharedState {
     fn default() -> Self {
         Self {
-            position: Arc::default(),
+            position: AtomicF64::default(),
             paused: AtomicBool::new(true),
         }
     }
@@ -109,11 +113,6 @@ impl MusicRenderer {
                 MusicCommand::SeekTo(position) => {
                     self.index = (position * sample_rate as f64 / self.settings.playback_rate)
                         .round() as usize;
-                    if let Some(state) = self.state.upgrade() {
-                        state
-                            .position
-                            .store(position, Ordering::SeqCst);
-                    }
                 }
                 MusicCommand::SetLowPass(low_pass) => {
                     self.low_pass = low_pass;
@@ -363,7 +362,7 @@ impl Music {
 
     pub fn clock(&self) -> MusicClock {
         MusicClock {
-            position: Arc::clone(&self.arc.position),
+            state: Arc::clone(&self.arc),
             rate: self.rate,
         }
     }

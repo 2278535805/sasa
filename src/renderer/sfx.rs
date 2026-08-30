@@ -46,6 +46,9 @@ impl SfxRenderer {
             }
         }
         if let Some(clock) = &self.clock {
+            if clock.paused() {
+                return;
+            }
             let now = clock.position();
             let window = clock.rate() * buffer_time;
             while let Some(&(time, _)) = self.scheduled.front() {
