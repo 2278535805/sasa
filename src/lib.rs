@@ -35,6 +35,7 @@ fn buffer_is_full<E>(_: E) -> anyhow::Error {
 
 #[derive(Clone, Copy, Default)]
 pub struct Frame(pub f32, pub f32);
+
 impl Frame {
     pub fn avg(&self) -> f32 {
         (self.0 + self.1) / 2.

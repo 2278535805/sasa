@@ -8,6 +8,7 @@ use std::sync::{Arc, Weak};
 pub struct PlaySfxParams {
     pub amplifier: f32,
 }
+
 impl Default for PlaySfxParams {
     fn default() -> Self {
         Self { amplifier: 1. }
@@ -135,6 +136,7 @@ pub struct Sfx {
     prod: HeapProducer<SfxCommand>,
     clock: Option<MusicClock>,
 }
+
 impl Sfx {
     pub const DEFAULT_BUFFER_SIZE: usize = 64;
 

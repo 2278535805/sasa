@@ -14,6 +14,7 @@ pub struct MusicParams {
     pub playback_rate: f64,
     pub command_buffer_size: usize,
 }
+
 impl Default for MusicParams {
     fn default() -> Self {
         Self {
@@ -30,6 +31,7 @@ pub struct MusicClock {
     position: Arc<AtomicF64>,
     rate: f64,
 }
+
 impl MusicClock {
     pub(crate) fn position(&self) -> f64 {
         self.position.load(Ordering::SeqCst)
@@ -44,6 +46,7 @@ struct SharedState {
     position: Arc<AtomicF64>,
     paused: AtomicBool,
 }
+
 impl Default for SharedState {
     fn default() -> Self {
         Self {
@@ -76,6 +79,7 @@ pub(crate) struct MusicRenderer {
     fade_time: i32,
     fade_current: i32,
 }
+
 impl MusicRenderer {
     fn prepare(&mut self, sample_rate: u32) {
         if self.last_sample_rate != sample_rate {
@@ -270,6 +274,7 @@ pub struct Music {
     prod: HeapProducer<MusicCommand>,
     rate: f64,
 }
+
 impl Music {
     pub(crate) fn new(clip: AudioClip, settings: MusicParams) -> (Music, MusicRenderer) {
         let (prod, cons) = HeapRb::new(settings.command_buffer_size).split();
