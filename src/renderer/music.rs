@@ -105,6 +105,11 @@ impl MusicRenderer {
                 MusicCommand::SeekTo(position) => {
                     self.index = (position * sample_rate as f64 / self.settings.playback_rate)
                         .round() as usize;
+                    if let Some(state) = self.state.upgrade() {
+                        state
+                            .position
+                            .store(position, Ordering::SeqCst);
+                    }
                 }
                 MusicCommand::SetLowPass(low_pass) => {
                     self.low_pass = low_pass;
