@@ -118,25 +118,9 @@ fn mode_period_hns(mode: &StreamMode) -> u32 {
 }
 
 const AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED: i32 = 0x88890019u32 as i32;
-const AUDCLNT_E_BUFFER_ERROR: i32 = 0x88890018u32 as i32;
-const AUDCLNT_E_BUFFER_TOO_LARGE: i32 = 0x88890006u32 as i32;
-
-fn hresult(err: &WasapiError) -> Option<i32> {
-    match err {
-        WasapiError::Windows(e) => Some(e.code().0),
-        _ => None,
-    }
-}
 
 fn is_buffer_size_not_aligned(err: &WasapiError) -> bool {
-    hresult(err) == Some(AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED)
-}
-
-fn is_buffer_retryable(err: &WasapiError) -> bool {
-    matches!(
-        hresult(err),
-        Some(AUDCLNT_E_BUFFER_ERROR) | Some(AUDCLNT_E_BUFFER_TOO_LARGE)
-    )
+    matches!(err, WasapiError::Windows(e) if e.code().0 == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED)
 }
 
 fn audio_client_properties(
@@ -484,8 +468,7 @@ impl WasapiBackend {
             && matches!(settings.timing, Timing::Polling)
         {
             let result = Self::run_playback_session(&settings, &state, &shared);
-            if let Err(e) = &result {
-                eprintln!("wasapi polling playback stopped: {e}");
+            if result.is_err() {
                 shared.broken.store(true, Ordering::Relaxed);
             }
             return result;
@@ -718,23 +701,7 @@ impl WasapiBackend {
             byte_buf.resize(n_bytes, 0u8);
             conversion.f32_to_bytes(&f32_buf, &mut byte_buf);
 
-            let mut write_result =
-                render_client.write_to_device(buffer_frames as usize, &byte_buf, None);
-            let mut write_retries = 0u32;
-            while let Err(e) = &write_result {
-                if !is_buffer_retryable(e) || write_retries >= 10 {
-                    break;
-                }
-                write_retries += 1;
-                if polling {
-                    std::thread::sleep(poll_interval);
-                } else if h_event.as_ref().unwrap().wait_for_event(100).is_err() {
-                    break;
-                }
-                write_result =
-                    render_client.write_to_device(buffer_frames as usize, &byte_buf, None);
-            }
-            if let Err(e) = write_result {
+            if let Err(e) = render_client.write_to_device(buffer_frames as usize, &byte_buf, None) {
                 let _ = audio_client.stop_stream();
                 shared.broken.store(true, Ordering::Relaxed);
                 loop_result = Err(anyhow::anyhow!(e));
