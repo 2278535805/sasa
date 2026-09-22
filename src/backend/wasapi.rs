@@ -359,7 +359,7 @@ impl Default for WasapiSettings {
             share_mode: ShareMode::Shared,
             stream_category: StreamCategory::Other,
             stream_option: None,
-            timing: Timing::Events,
+            timing: Timing::Polling,
         }
     }
 }
