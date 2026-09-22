@@ -4,7 +4,7 @@ use std::{
         Arc, Mutex,
     },
     thread::JoinHandle,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -118,9 +118,25 @@ fn mode_period_hns(mode: &StreamMode) -> u32 {
 }
 
 const AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED: i32 = 0x88890019u32 as i32;
+const AUDCLNT_E_BUFFER_ERROR: i32 = 0x88890018u32 as i32;
+const AUDCLNT_E_BUFFER_TOO_LARGE: i32 = 0x88890006u32 as i32;
+
+fn hresult(err: &WasapiError) -> Option<i32> {
+    match err {
+        WasapiError::Windows(e) => Some(e.code().0),
+        _ => None,
+    }
+}
 
 fn is_buffer_size_not_aligned(err: &WasapiError) -> bool {
-    matches!(err, WasapiError::Windows(e) if e.code().0 == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED)
+    hresult(err) == Some(AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED)
+}
+
+fn is_buffer_retryable(err: &WasapiError) -> bool {
+    matches!(
+        hresult(err),
+        Some(AUDCLNT_E_BUFFER_ERROR) | Some(AUDCLNT_E_BUFFER_TOO_LARGE)
+    )
 }
 
 fn audio_client_properties(
@@ -134,16 +150,60 @@ fn audio_client_properties(
     props
 }
 
+const POLLING_BUFFER_PERIODS: i64 = 1;
+
+fn exclusive_mode(
+    timing: Timing,
+    period_hns: i64,
+    buffer_size: Option<u32>,
+    sample_rate: usize,
+) -> StreamMode {
+    match timing {
+        Timing::Events => StreamMode::EventsExclusive { period_hns },
+        Timing::Polling => {
+            let buffer_duration_hns = buffer_size
+                .map(|bs| calculate_period_100ns(bs as i64, sample_rate as i64))
+                .unwrap_or(period_hns * POLLING_BUFFER_PERIODS);
+            StreamMode::PollingExclusive {
+                period_hns,
+                buffer_duration_hns: buffer_duration_hns.max(period_hns),
+            }
+        }
+    }
+}
+
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(uperiod: u32) -> u32;
+    fn timeEndPeriod(uperiod: u32) -> u32;
+}
+
+struct PollTimer;
+
+impl PollTimer {
+    fn new() -> Self {
+        unsafe {
+            timeBeginPeriod(1);
+        }
+        Self
+    }
+}
+
+impl Drop for PollTimer {
+    fn drop(&mut self) {
+        unsafe {
+            timeEndPeriod(1);
+        }
+    }
+}
+
 fn probe_exclusive_format(
     device: &Device,
-    sample_rate: Option<u32>,
+    settings: &WasapiSettings,
     desired_ch: usize,
-    buffer_size: Option<u32>,
     direction: Direction,
-    stream_category: StreamCategory,
-    stream_option: Option<StreamOption>,
 ) -> Result<(AudioClient, WaveFormat, SampleConversion, StreamMode)> {
-    let sample_rates: Vec<usize> = if let Some(sr) = sample_rate {
+    let sample_rates: Vec<usize> = if let Some(sr) = settings.sample_rate {
         vec![sr as usize]
     } else {
         vec![192000, 96000, 48000, 44100, 24000, 22050, 16000, 12000, 11025, 8000]
@@ -195,10 +255,14 @@ fn probe_exclusive_format(
                 }
             };
 
-            let period_hns = if let Some(bs) = buffer_size {
-                calculate_period_100ns(bs as i64, supported.get_samplespersec() as i64)
-            } else {
-                min_period
+            let period_hns = match settings.timing {
+                Timing::Events => settings
+                    .buffer_size
+                    .map(|bs| {
+                        calculate_period_100ns(bs as i64, supported.get_samplespersec() as i64)
+                    })
+                    .unwrap_or(min_period),
+                Timing::Polling => min_period,
             };
 
             let desired_period = match audio_client
@@ -211,13 +275,16 @@ fn probe_exclusive_format(
                 }
             };
 
-            let mut mode = StreamMode::EventsExclusive {
-                period_hns: desired_period,
-            };
+            let mut mode = exclusive_mode(
+                settings.timing,
+                desired_period,
+                settings.buffer_size,
+                supported.get_samplespersec() as usize,
+            );
 
             let _ = audio_client.set_properties(audio_client_properties(
-                stream_category,
-                stream_option,
+                settings.stream_category,
+                settings.stream_option,
             ));
 
             match audio_client.initialize_client(&supported, &direction, &mode) {
@@ -237,9 +304,12 @@ fn probe_exclusive_format(
                         aligned_frames as i64,
                         supported.get_samplespersec() as i64,
                     );
-                    mode = StreamMode::EventsExclusive {
-                        period_hns: aligned_period,
-                    };
+                    mode = exclusive_mode(
+                        settings.timing,
+                        aligned_period,
+                        settings.buffer_size,
+                        supported.get_samplespersec() as usize,
+                    );
                     drop(audio_client);
                     let mut aligned_client = match device.get_iaudioclient() {
                         Ok(client) => client,
@@ -252,8 +322,8 @@ fn probe_exclusive_format(
                         }
                     };
                     let _ = aligned_client.set_properties(audio_client_properties(
-                        stream_category,
-                        stream_option,
+                        settings.stream_category,
+                        settings.stream_option,
                     ));
                     match aligned_client.initialize_client(&supported, &direction, &mode) {
                         Ok(()) => return Ok((aligned_client, supported, *conversion, mode)),
@@ -279,6 +349,12 @@ fn probe_exclusive_format(
     ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Timing {
+    Events,
+    Polling,
+}
+
 #[derive(Debug, Clone)]
 pub struct WasapiSettings {
     pub buffer_size: Option<u32>,
@@ -287,6 +363,7 @@ pub struct WasapiSettings {
     pub share_mode: ShareMode,
     pub stream_category: StreamCategory,
     pub stream_option: Option<StreamOption>,
+    pub timing: Timing,
 }
 
 impl Default for WasapiSettings {
@@ -298,6 +375,7 @@ impl Default for WasapiSettings {
             share_mode: ShareMode::Shared,
             stream_category: StreamCategory::Other,
             stream_option: None,
+            timing: Timing::Events,
         }
     }
 }
@@ -331,6 +409,7 @@ impl std::fmt::Display for WasapiStreamInfo {
         writeln!(f, "settings.sample_rate: {:?}", self.settings.sample_rate)?;
         writeln!(f, "settings.channels: {:?}", self.settings.channels)?;
         writeln!(f, "settings.exclusive: {:?}", self.settings.share_mode)?;
+        writeln!(f, "settings.timing: {:?}", self.settings.timing)?;
         writeln!(f, "sample_rate: {:?}", self.sample_rate)?;
         writeln!(f, "channels: {:?}", self.channels)?;
         writeln!(f, "device_name: {:?}", self.device_name)?;
@@ -401,6 +480,17 @@ impl WasapiBackend {
     ) -> Result<()> {
         let _ = initialize_mta().ok();
 
+        if matches!(settings.share_mode, ShareMode::Exclusive)
+            && matches!(settings.timing, Timing::Polling)
+        {
+            let result = Self::run_playback_session(&settings, &state, &shared);
+            if let Err(e) = &result {
+                eprintln!("wasapi polling playback stopped: {e}");
+                shared.broken.store(true, Ordering::Relaxed);
+            }
+            return result;
+        }
+
         loop {
             if !shared.running.load(Ordering::Relaxed) {
                 return Ok(());
@@ -456,16 +546,8 @@ impl WasapiBackend {
             WaveFormat::new(32, 32, &SampleType::Float, desired_sr, desired_ch, None);
 
         let (audio_client, actual_format, conversion, mode) = if matches!(settings.share_mode, ShareMode::Exclusive) {
-            probe_exclusive_format(
-                &device,
-                settings.sample_rate,
-                desired_ch,
-                settings.buffer_size,
-                Direction::Render,
-                settings.stream_category,
-                settings.stream_option,
-            )
-            .context("exclusive format not supported")?
+            probe_exclusive_format(&device, settings, desired_ch, Direction::Render)
+                .context("exclusive format not supported")?
         } else {
             let mut client = device
                 .get_iaudioclient()
@@ -528,9 +610,6 @@ impl WasapiBackend {
         shared.channels.store(actual_ch_u32, Ordering::Relaxed);
         state.get().0.sample_rate = actual_sr;
 
-        let h_event = audio_client
-            .set_get_eventhandle()
-            .context("get event handle")?;
         let render_client = audio_client
             .get_audiorenderclient()
             .context("get render client")?;
@@ -540,6 +619,17 @@ impl WasapiBackend {
                 shared.clock_frequency.store(freq, Ordering::Relaxed);
             }
         }
+
+        let polling = matches!(mode, StreamMode::PollingExclusive { .. });
+        let h_event = if polling {
+            None
+        } else {
+            Some(audio_client.set_get_eventhandle().context("get event handle")?)
+        };
+        let buffer_frames_total = audio_client.get_buffer_size().context("get buffer size")?;
+        let target_frames = (buffer_frames_total / 2).max(actual_sr / 500);
+        let poll_interval = Duration::from_millis(1);
+        let _poll_timer = polling.then(PollTimer::new);
 
         audio_client.start_stream().context("start stream")?;
 
@@ -557,12 +647,8 @@ impl WasapiBackend {
             }
 
             let callback_instant = Instant::now();
-            let interval_secs = callback_instant
-                .duration_since(last_callback_instant)
-                .as_secs_f64();
-            last_callback_instant = callback_instant;
 
-            let buffer_frames = match audio_client.get_available_space_in_frames() {
+            let available = match audio_client.get_available_space_in_frames() {
                 Ok(f) => f,
                 Err(e) => {
                     let _ = audio_client.stop_stream();
@@ -572,34 +658,49 @@ impl WasapiBackend {
                 }
             };
 
-            if buffer_frames == 0 {
-                if h_event.wait_for_event(100).is_err() {
-                    let _ = audio_client.stop_stream();
-                    shared.broken.store(true, Ordering::Relaxed);
-                    loop_result = Err(anyhow::anyhow!("event wait timeout"));
-                    break;
+            let buffer_frames = if polling {
+                let padding = buffer_frames_total.saturating_sub(available);
+                if available == 0 || padding >= target_frames {
+                    std::thread::sleep(poll_interval);
+                    continue;
                 }
-                continue;
-            }
+                (target_frames - padding).min(available)
+            } else {
+                if available == 0 {
+                    if h_event.as_ref().unwrap().wait_for_event(100).is_err() {
+                        let _ = audio_client.stop_stream();
+                        shared.broken.store(true, Ordering::Relaxed);
+                        loop_result = Err(anyhow::anyhow!("event wait timeout"));
+                        break;
+                    }
+                    continue;
+                }
 
-            if exclusive {
-                let expected_interval = buffer_frames as f64 / actual_sr as f64;
-                if interval_secs > expected_interval * 1.5 {
-                    interval_strikes += 1;
-                } else {
-                    interval_strikes = 0;
+                if exclusive {
+                    let interval_secs = callback_instant
+                        .duration_since(last_callback_instant)
+                        .as_secs_f64();
+                    last_callback_instant = callback_instant;
+                    let expected_interval = available as f64 / actual_sr as f64;
+                    if interval_secs > expected_interval * 1.5 {
+                        interval_strikes += 1;
+                    } else {
+                        interval_strikes = 0;
+                    }
+                    if interval_strikes >= 3 {
+                        let _ = audio_client.stop_stream();
+                        shared.stalled.store(true, Ordering::Relaxed);
+                        eprintln!(
+                            "wasapi playback stalled: callback interval {:.2}ms vs expected {:.2}ms",
+                            interval_secs * 1000.0,
+                            expected_interval * 1000.0
+                        );
+                        break;
+                    }
                 }
-                if interval_strikes >= 3 {
-                    let _ = audio_client.stop_stream();
-                    shared.stalled.store(true, Ordering::Relaxed);
-                    eprintln!(
-                        "wasapi playback stalled: callback interval {:.2}ms vs expected {:.2}ms",
-                        interval_secs * 1000.0,
-                        expected_interval * 1000.0
-                    );
-                    break;
-                }
-            }
+
+                available
+            };
 
             shared.actual_frames.store(buffer_frames, Ordering::Relaxed);
 
@@ -617,7 +718,23 @@ impl WasapiBackend {
             byte_buf.resize(n_bytes, 0u8);
             conversion.f32_to_bytes(&f32_buf, &mut byte_buf);
 
-            if let Err(e) = render_client.write_to_device(buffer_frames as usize, &byte_buf, None) {
+            let mut write_result =
+                render_client.write_to_device(buffer_frames as usize, &byte_buf, None);
+            let mut write_retries = 0u32;
+            while let Err(e) = &write_result {
+                if !is_buffer_retryable(e) || write_retries >= 10 {
+                    break;
+                }
+                write_retries += 1;
+                if polling {
+                    std::thread::sleep(poll_interval);
+                } else if h_event.as_ref().unwrap().wait_for_event(100).is_err() {
+                    break;
+                }
+                write_result =
+                    render_client.write_to_device(buffer_frames as usize, &byte_buf, None);
+            }
+            if let Err(e) = write_result {
                 let _ = audio_client.stop_stream();
                 shared.broken.store(true, Ordering::Relaxed);
                 loop_result = Err(anyhow::anyhow!(e));
@@ -626,7 +743,7 @@ impl WasapiBackend {
 
             let post_padding = audio_client.get_current_padding().unwrap_or(0);
             shared.current_padding.store(post_padding, Ordering::Relaxed);
-            shared.available_space.store(buffer_frames, Ordering::Relaxed);
+            shared.available_space.store(available, Ordering::Relaxed);
             if let Some(ref clock) = audio_clock {
                 if let Ok((pos, _timer)) = clock.get_position() {
                     shared.clock_position.store(pos, Ordering::Relaxed);
@@ -641,7 +758,9 @@ impl WasapiBackend {
             let total_delay_sec = stream_delay_sec + callback_instant.elapsed().as_secs_f64();
             rec.push(total_delay_sec);
 
-            if h_event.wait_for_event(1000).is_err() {
+            if polling {
+                std::thread::sleep(poll_interval);
+            } else if h_event.as_ref().unwrap().wait_for_event(1000).is_err() {
                 let _ = audio_client.stop_stream();
                 shared.broken.store(true, Ordering::Relaxed);
                 loop_result = Err(anyhow::anyhow!("event wait timeout"));
@@ -818,16 +937,8 @@ impl WasapiRecorderBackend {
         };
 
         let (audio_client, actual_format, conversion, mode) = if matches!(settings.share_mode, ShareMode::Exclusive) {
-            probe_exclusive_format(
-                &device,
-                settings.sample_rate,
-                desired_ch,
-                settings.buffer_size,
-                Direction::Capture,
-                settings.stream_category,
-                settings.stream_option,
-            )
-            .context("exclusive capture format not supported")?
+            probe_exclusive_format(&device, &settings, desired_ch, Direction::Capture)
+                .context("exclusive capture format not supported")?
         } else {
             let desired_format =
                 WaveFormat::new(32, 32, &SampleType::Float, desired_sr, desired_ch, None);
@@ -891,9 +1002,12 @@ impl WasapiRecorderBackend {
         shared.channels.store(actual_ch as u32, Ordering::Relaxed);
         state.get().0.sample_rate = actual_sr;
 
-        let h_event = audio_client
-            .set_get_eventhandle()
-            .context("get event handle")?;
+        let polling = matches!(mode, StreamMode::PollingExclusive { .. });
+        let h_event = if polling {
+            None
+        } else {
+            Some(audio_client.set_get_eventhandle().context("get event handle")?)
+        };
         let capture_client = audio_client
             .get_audiocaptureclient()
             .context("get capture client")?;
@@ -905,6 +1019,9 @@ impl WasapiRecorderBackend {
         }
 
         audio_client.start_stream().context("start stream")?;
+
+        let poll_interval = Duration::from_millis(1);
+        let _poll_timer = polling.then(PollTimer::new);
 
         let buffer_size = audio_client.get_buffer_size().context("get buffer size")? as usize;
         let bytes_per_frame = actual_format.get_blockalign() as usize;
@@ -931,7 +1048,11 @@ impl WasapiRecorderBackend {
             };
 
             if nbr_frames == 0 {
-                if h_event.wait_for_event(100).is_err() {
+                if polling {
+                    std::thread::sleep(poll_interval);
+                    continue;
+                }
+                if h_event.as_ref().unwrap().wait_for_event(100).is_err() {
                     let _ = audio_client.stop_stream();
                     shared.broken.store(true, Ordering::Relaxed);
                     loop_result = Err(anyhow::anyhow!("event wait timeout"));
@@ -970,7 +1091,9 @@ impl WasapiRecorderBackend {
             let total_delay_sec = stream_delay_sec + callback_instant.elapsed().as_secs_f64();
             rec.push(total_delay_sec);
 
-            if h_event.wait_for_event(1000).is_err() {
+            if polling {
+                std::thread::sleep(poll_interval);
+            } else if h_event.as_ref().unwrap().wait_for_event(1000).is_err() {
                 let _ = audio_client.stop_stream();
                 shared.broken.store(true, Ordering::Relaxed);
                 loop_result = Err(anyhow::anyhow!("event wait timeout"));
