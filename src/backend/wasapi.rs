@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 pub use wasapi::{ShareMode, StreamCategory, StreamOption};
 use wasapi::{
     calculate_period_100ns, initialize_mta, AudioClient, AudioClientProperties, Device,
-    DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat,
+    DeviceEnumerator, Direction, SampleType, StreamMode, WasapiError, WaveFormat,
 };
 
 use super::{BackendSetup, BackendStreamInfo, RecorderBackendSetup, RecorderStateCell, StateCell};
@@ -117,6 +117,23 @@ fn mode_period_hns(mode: &StreamMode) -> u32 {
     }
 }
 
+const AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED: i32 = 0x88890019u32 as i32;
+
+fn is_buffer_size_not_aligned(err: &WasapiError) -> bool {
+    matches!(err, WasapiError::Windows(e) if e.code().0 == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED)
+}
+
+fn audio_client_properties(
+    stream_category: StreamCategory,
+    stream_option: Option<StreamOption>,
+) -> AudioClientProperties {
+    let mut props = AudioClientProperties::new().set_category(stream_category);
+    if let Some(option) = stream_option {
+        props = props.set_option(option);
+    }
+    props
+}
+
 fn probe_exclusive_format(
     device: &Device,
     sample_rate: Option<u32>,
@@ -194,21 +211,60 @@ fn probe_exclusive_format(
                 }
             };
 
-            let mode = StreamMode::EventsExclusive {
+            let mut mode = StreamMode::EventsExclusive {
                 period_hns: desired_period,
             };
 
-            let props = {
-                let mut p = AudioClientProperties::new().set_category(stream_category);
-                if let Some(opt) = stream_option {
-                    p = p.set_option(opt);
-                }
-                p
-            };
-            let _ = audio_client.set_properties(props);
+            let _ = audio_client.set_properties(audio_client_properties(
+                stream_category,
+                stream_option,
+            ));
 
             match audio_client.initialize_client(&supported, &direction, &mode) {
                 Ok(()) => return Ok((audio_client, supported, *conversion, mode)),
+                Err(e) if is_buffer_size_not_aligned(&e) => {
+                    let aligned_frames = match audio_client.get_buffer_size() {
+                        Ok(frames) => frames,
+                        Err(e) => {
+                            last_err = format!(
+                                "{storebits}bit {:?} {}Hz get_buffer_size after unaligned: {e}",
+                                sample_type, sr
+                            );
+                            continue;
+                        }
+                    };
+                    let aligned_period = calculate_period_100ns(
+                        aligned_frames as i64,
+                        supported.get_samplespersec() as i64,
+                    );
+                    mode = StreamMode::EventsExclusive {
+                        period_hns: aligned_period,
+                    };
+                    drop(audio_client);
+                    let mut aligned_client = match device.get_iaudioclient() {
+                        Ok(client) => client,
+                        Err(e) => {
+                            last_err = format!(
+                                "{storebits}bit {:?} {}Hz get_iaudioclient after unaligned: {e}",
+                                sample_type, sr
+                            );
+                            continue;
+                        }
+                    };
+                    let _ = aligned_client.set_properties(audio_client_properties(
+                        stream_category,
+                        stream_option,
+                    ));
+                    match aligned_client.initialize_client(&supported, &direction, &mode) {
+                        Ok(()) => return Ok((aligned_client, supported, *conversion, mode)),
+                        Err(e) => {
+                            last_err = format!(
+                                "{storebits}bit {:?} {}Hz init with aligned {aligned_frames} frames: {e}",
+                                sample_type, sr
+                            );
+                        }
+                    }
+                }
                 Err(e) => {
                     last_err = format!(
                         "{storebits}bit {:?} {}Hz init: {e}",
@@ -300,6 +356,7 @@ impl std::fmt::Display for WasapiStreamInfo {
 #[derive(Clone, Default)]
 struct WasapiSharedState {
     broken: Arc<AtomicBool>,
+    stalled: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     sample_rate: Arc<AtomicU32>,
     channels: Arc<AtomicU32>,
@@ -344,6 +401,30 @@ impl WasapiBackend {
     ) -> Result<()> {
         let _ = initialize_mta().ok();
 
+        loop {
+            if !shared.running.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            shared.stalled.store(false, Ordering::Relaxed);
+            let result = Self::run_playback_session(&settings, &state, &shared);
+            let stalled = shared.stalled.load(Ordering::Relaxed);
+            match result {
+                Ok(()) if !stalled => return Ok(()),
+                Err(e) if !stalled => {
+                    shared.broken.store(true, Ordering::Relaxed);
+                    return Err(e);
+                }
+                Ok(()) => eprintln!("wasapi playback stalled, rebuilding stream"),
+                Err(e) => eprintln!("wasapi playback stalled, rebuilding stream: {e}"),
+            }
+        }
+    }
+
+    fn run_playback_session(
+        settings: &WasapiSettings,
+        state: &Arc<StateCell>,
+        shared: &WasapiSharedState,
+    ) -> Result<()> {
         let enumerator = DeviceEnumerator::new().context("create device enumerator")?;
         let device = enumerator
             .get_default_device(&Direction::Render)
@@ -464,6 +545,9 @@ impl WasapiBackend {
 
         let mut f32_buf = Vec::new();
         let mut byte_buf = Vec::new();
+        let exclusive = matches!(settings.share_mode, ShareMode::Exclusive);
+        let mut last_callback_instant = Instant::now();
+        let mut interval_strikes = 0u32;
         let mut loop_result = Ok(());
 
         loop {
@@ -473,6 +557,10 @@ impl WasapiBackend {
             }
 
             let callback_instant = Instant::now();
+            let interval_secs = callback_instant
+                .duration_since(last_callback_instant)
+                .as_secs_f64();
+            last_callback_instant = callback_instant;
 
             let buffer_frames = match audio_client.get_available_space_in_frames() {
                 Ok(f) => f,
@@ -492,6 +580,25 @@ impl WasapiBackend {
                     break;
                 }
                 continue;
+            }
+
+            if exclusive {
+                let expected_interval = buffer_frames as f64 / actual_sr as f64;
+                if interval_secs > expected_interval * 1.5 {
+                    interval_strikes += 1;
+                } else {
+                    interval_strikes = 0;
+                }
+                if interval_strikes >= 3 {
+                    let _ = audio_client.stop_stream();
+                    shared.stalled.store(true, Ordering::Relaxed);
+                    eprintln!(
+                        "wasapi playback stalled: callback interval {:.2}ms vs expected {:.2}ms",
+                        interval_secs * 1000.0,
+                        expected_interval * 1000.0
+                    );
+                    break;
+                }
             }
 
             shared.actual_frames.store(buffer_frames, Ordering::Relaxed);
