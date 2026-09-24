@@ -8,9 +8,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-pub use wasapi::{ShareMode, StreamCategory, StreamOption};
+pub use wasapi::{ShareMode, StreamCategory, StreamOption, calculate_period_100ns};
 use wasapi::{
-    calculate_period_100ns, initialize_mta, AudioClient, AudioClientProperties, Device,
+    initialize_mta, AudioClient, AudioClientProperties, Device,
     DeviceEnumerator, Direction, SampleType, StreamMode, WasapiError, WaveFormat,
 };
 
@@ -134,7 +134,7 @@ fn audio_client_properties(
     props
 }
 
-const POLLING_BUFFER_PERIODS: i64 = 1;
+const POLLING_BUFFER_PERIODS: i64 = 2;
 
 fn exclusive_mode(
     timing: Timing,
@@ -146,11 +146,11 @@ fn exclusive_mode(
         Timing::Events => StreamMode::EventsExclusive { period_hns },
         Timing::Polling => {
             let buffer_duration_hns = buffer_size
-                .map(|bs| calculate_period_100ns(bs as i64, sample_rate as i64))
-                .unwrap_or(period_hns * POLLING_BUFFER_PERIODS);
+                .map(|buffer_size| calculate_period_100ns(buffer_size as i64, sample_rate as i64))
+                .unwrap_or(period_hns);
             StreamMode::PollingExclusive {
-                period_hns,
-                buffer_duration_hns: buffer_duration_hns.max(period_hns),
+                period_hns: buffer_duration_hns.max(period_hns),
+                buffer_duration_hns: buffer_duration_hns.max(period_hns) * POLLING_BUFFER_PERIODS,
             }
         }
     }
