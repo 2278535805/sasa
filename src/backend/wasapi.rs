@@ -347,14 +347,12 @@ fn probe_exclusive_format(
                 }
             };
 
-            let period_hns = match settings.timing {
-                Timing::Events => settings
-                    .buffer_size
-                    .map(|bs| {
-                        calculate_period_100ns(bs as i64, supported.get_samplespersec() as i64)
-                    })
+            let period_hns = match settings.buffer_size {
+                Some(bs) => calculate_period_100ns(bs as i64, supported.get_samplespersec() as i64),
+                None => audio_client
+                    .get_device_period()
+                    .map(|(default_period, _)| default_period)
                     .unwrap_or(0),
-                Timing::Polling => 0,
             };
 
             let desired_period =
