@@ -447,7 +447,7 @@ impl Default for WasapiSettings {
             share_mode: ShareMode::Shared,
             stream_category: StreamCategory::Other,
             stream_option: None,
-            timing: Timing::Polling,
+            timing: Timing::Events,
         }
     }
 }
@@ -722,12 +722,19 @@ fn setup_session(
             let mut client = device.get_iaudioclient().context("get audio client")?;
             let (def_period, _min_period) =
                 client.get_device_period().context("get device period")?;
-            let mode = StreamMode::EventsShared {
-                autoconvert: true,
-                buffer_duration_hns: if let Some(bs) = settings.buffer_size {
-                    calculate_period_100ns(bs as i64, desired_sr as i64)
-                } else {
-                    def_period
+            let buffer_duration_hns = if let Some(bs) = settings.buffer_size {
+                calculate_period_100ns(bs as i64, desired_sr as i64)
+            } else {
+                def_period
+            };
+            let mode = match settings.timing {
+                Timing::Events => StreamMode::EventsShared {
+                    autoconvert: true,
+                    buffer_duration_hns,
+                },
+                Timing::Polling => StreamMode::PollingShared {
+                    autoconvert: true,
+                    buffer_duration_hns,
                 },
             };
             apply_audio_client_properties(&client, settings);
@@ -777,7 +784,10 @@ fn setup_session(
     shared.sample_rate.store(sample_rate, Ordering::Relaxed);
     shared.channels.store(channels as u32, Ordering::Relaxed);
 
-    let polling = matches!(mode, StreamMode::PollingExclusive { .. });
+    let polling = matches!(
+        mode,
+        StreamMode::PollingExclusive { .. } | StreamMode::PollingShared { .. }
+    );
     let h_event = if polling {
         None
     } else {
