@@ -1025,7 +1025,7 @@ impl WasapiBackend {
                         .as_secs_f64();
                     *last_callback_instant = callback_instant;
                     let expected_interval = available as f64 / actual_sr as f64;
-                    if interval_secs > expected_interval * 1.5 {
+                    if interval_secs > expected_interval * 1.9 {
                         *interval_strikes += 1;
                     } else {
                         *interval_strikes = 0;
