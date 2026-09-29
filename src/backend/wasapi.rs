@@ -659,10 +659,17 @@ struct WasapiSession {
     channels: u16,
 }
 
+struct CachedSetup {
+    format: WaveFormat,
+    conversion: SampleConversion,
+    mode: StreamMode,
+}
+
 fn setup_session(
     settings: &WasapiSettings,
     direction: Direction,
     shared: &WasapiSharedState,
+    cache: &mut Option<CachedSetup>,
 ) -> Result<WasapiSession> {
     let enumerator = DeviceEnumerator::new().context("create device enumerator")?;
     let device = enumerator
@@ -691,8 +698,41 @@ fn setup_session(
 
     let (audio_client, format, conversion, mode) =
         if matches!(settings.share_mode, ShareMode::Exclusive) {
-            probe_exclusive_format(&device, settings, desired_ch, direction)
-                .context("exclusive format not supported")?
+            let mut reused: Option<(AudioClient, WaveFormat, SampleConversion, StreamMode)> = None;
+            if let Some(cached) = cache.as_ref() {
+                match device.get_iaudioclient() {
+                    Ok(mut client) => {
+                        apply_audio_client_properties(&client, settings);
+                        match client.initialize_client(&cached.format, &direction, &cached.mode) {
+                            Ok(()) => {
+                                reused = Some((
+                                    client,
+                                    cached.format.clone(),
+                                    cached.conversion,
+                                    cached.mode,
+                                ));
+                            }
+                            Err(e) => eprintln!(
+                                "wasapi: reusing cached exclusive format failed: {e}, re-probing"
+                            ),
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "wasapi: get audio client for cached format failed: {e}, re-probing"
+                    ),
+                }
+            }
+            let built = match reused {
+                Some(built) => built,
+                None => probe_exclusive_format(&device, settings, desired_ch, direction)
+                    .context("exclusive format not supported")?,
+            };
+            *cache = Some(CachedSetup {
+                format: built.1.clone(),
+                conversion: built.2,
+                mode: built.3,
+            });
+            built
         } else {
             let desired_format =
                 WaveFormat::new(32, 32, &SampleType::Float, desired_sr, desired_ch, None);
@@ -807,10 +847,12 @@ impl WasapiBackend {
         let _com = ComGuard::new()?;
         let _mmcss = MmcssGuard::new();
 
+        let mut setup_cache: Option<CachedSetup> = None;
+
         if matches!(settings.share_mode, ShareMode::Exclusive)
             && matches!(settings.timing, Timing::Polling)
         {
-            let result = Self::run_playback_session(&settings, &state, &shared);
+            let result = Self::run_playback_session(&settings, &state, &shared, &mut setup_cache);
             if result.is_err() {
                 shared.broken.store(true, Ordering::Relaxed);
             }
@@ -822,7 +864,7 @@ impl WasapiBackend {
                 return Ok(());
             }
             shared.stalled.store(false, Ordering::Relaxed);
-            let result = Self::run_playback_session(&settings, &state, &shared);
+            let result = Self::run_playback_session(&settings, &state, &shared, &mut setup_cache);
             let stalled = shared.stalled.load(Ordering::Relaxed);
             match result {
                 Ok(()) if !stalled => return Ok(()),
@@ -840,6 +882,7 @@ impl WasapiBackend {
         settings: &WasapiSettings,
         state: &Arc<StateCell>,
         shared: &WasapiSharedState,
+        cache: &mut Option<CachedSetup>,
     ) -> Result<()> {
         let WasapiSession {
             audio_client,
@@ -850,7 +893,7 @@ impl WasapiBackend {
             sample_rate: actual_sr,
             channels: actual_ch,
             ..
-        } = setup_session(settings, Direction::Render, shared)?;
+        } = setup_session(settings, Direction::Render, shared, cache)?;
 
         state.get().0.sample_rate = actual_sr;
 
@@ -1078,6 +1121,8 @@ impl WasapiRecorderBackend {
         let _com = ComGuard::new()?;
         let _mmcss = MmcssGuard::new();
 
+        let mut setup_cache = None;
+
         let WasapiSession {
             audio_client,
             format,
@@ -1087,7 +1132,7 @@ impl WasapiRecorderBackend {
             audio_clock,
             sample_rate: actual_sr,
             channels: actual_ch,
-        } = setup_session(&settings, Direction::Capture, &shared)?;
+        } = setup_session(&settings, Direction::Capture, &shared, &mut setup_cache)?;
 
         state.get().0.sample_rate = actual_sr;
 
