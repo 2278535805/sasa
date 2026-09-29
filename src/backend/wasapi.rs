@@ -906,10 +906,60 @@ impl WasapiBackend {
         let poll_interval = Duration::from_millis(1);
         let _poll_timer = polling.then(PollTimer::new);
 
-        audio_client.start_stream().context("start stream")?;
-
         let mut f32_buf = Vec::new();
         let mut byte_buf = Vec::new();
+        let mut write_block =
+            |frames: u32, available: u32, callback_instant: Instant| -> Result<()> {
+                shared.frames_per_callback.store(frames, Ordering::Relaxed);
+                shared.available_space.store(available, Ordering::Relaxed);
+
+                let n_samples = frames as usize * actual_ch as usize;
+                f32_buf.resize(n_samples, 0f32);
+
+                let (mixer, rec) = state.get();
+                if actual_ch == 1 {
+                    mixer.render_mono(&mut f32_buf);
+                } else {
+                    mixer.render_stereo(&mut f32_buf);
+                }
+
+                let n_bytes = n_samples * conversion.bytes_per_sample();
+                byte_buf.resize(n_bytes, 0u8);
+                conversion.f32_to_bytes(&f32_buf, &mut byte_buf);
+
+                render_client
+                    .write_to_device(frames as usize, &byte_buf, None)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+
+                let post_padding = audio_client.get_current_padding().unwrap_or(0);
+                shared
+                    .current_padding
+                    .store(post_padding, Ordering::Relaxed);
+                if let Some(ref clock) = audio_clock {
+                    if let Ok((pos, _timer)) = clock.get_position() {
+                        shared.clock_position.store(pos, Ordering::Relaxed);
+                    }
+                }
+
+                let stream_delay_sec = if post_padding > 0 {
+                    post_padding as f64 / actual_sr as f64
+                } else {
+                    frames as f64 / actual_sr as f64
+                };
+                rec.push(stream_delay_sec + callback_instant.elapsed().as_secs_f64());
+                Ok(())
+            };
+
+        if !polling {
+            let prefill = buffer_frames_total;
+            if let Err(e) = write_block(prefill, prefill, Instant::now()) {
+                shared.broken.store(true, Ordering::Relaxed);
+                return Err(e).context("prefill render buffer");
+            }
+        }
+
+        audio_client.start_stream().context("start stream")?;
+
         let exclusive = matches!(settings.share_mode, ShareMode::Exclusive);
         let mut stall_tracker = (exclusive && !polling).then(|| (Instant::now(), 0u32));
         let mut loop_result = Ok(());
@@ -917,6 +967,13 @@ impl WasapiBackend {
         loop {
             if !shared.running.load(Ordering::Relaxed) {
                 let _ = audio_client.stop_stream();
+                break;
+            }
+
+            if !polling && h_event.as_ref().unwrap().wait_for_event(1000).is_err() {
+                let _ = audio_client.stop_stream();
+                shared.broken.store(true, Ordering::Relaxed);
+                loop_result = Err(anyhow::anyhow!("event wait timeout"));
                 break;
             }
 
@@ -941,12 +998,6 @@ impl WasapiBackend {
                 (target_frames - padding).min(available)
             } else {
                 if available == 0 {
-                    if h_event.as_ref().unwrap().wait_for_event(1000).is_err() {
-                        let _ = audio_client.stop_stream();
-                        shared.broken.store(true, Ordering::Relaxed);
-                        loop_result = Err(anyhow::anyhow!("event wait timeout"));
-                        break;
-                    }
                     continue;
                 }
 
@@ -976,57 +1027,15 @@ impl WasapiBackend {
                 available
             };
 
-            shared
-                .frames_per_callback
-                .store(buffer_frames, Ordering::Relaxed);
-
-            let n_samples = buffer_frames as usize * actual_ch as usize;
-            f32_buf.resize(n_samples, 0f32);
-
-            let (mixer, rec) = state.get();
-            if actual_ch == 1 {
-                mixer.render_mono(&mut f32_buf);
-            } else {
-                mixer.render_stereo(&mut f32_buf);
-            }
-
-            let n_bytes = n_samples * conversion.bytes_per_sample();
-            byte_buf.resize(n_bytes, 0u8);
-            conversion.f32_to_bytes(&f32_buf, &mut byte_buf);
-
-            if let Err(e) = render_client.write_to_device(buffer_frames as usize, &byte_buf, None) {
+            if let Err(e) = write_block(buffer_frames, available, callback_instant) {
                 let _ = audio_client.stop_stream();
                 shared.broken.store(true, Ordering::Relaxed);
-                loop_result = Err(anyhow::anyhow!(e));
+                loop_result = Err(e);
                 break;
             }
-
-            let post_padding = audio_client.get_current_padding().unwrap_or(0);
-            shared
-                .current_padding
-                .store(post_padding, Ordering::Relaxed);
-            shared.available_space.store(available, Ordering::Relaxed);
-            if let Some(ref clock) = audio_clock {
-                if let Ok((pos, _timer)) = clock.get_position() {
-                    shared.clock_position.store(pos, Ordering::Relaxed);
-                }
-            }
-
-            let stream_delay_sec = if post_padding > 0 {
-                post_padding as f64 / actual_sr as f64
-            } else {
-                buffer_frames as f64 / actual_sr as f64
-            };
-            let total_delay_sec = stream_delay_sec + callback_instant.elapsed().as_secs_f64();
-            rec.push(total_delay_sec);
 
             if polling {
                 std::thread::sleep(poll_interval);
-            } else if h_event.as_ref().unwrap().wait_for_event(1000).is_err() {
-                let _ = audio_client.stop_stream();
-                shared.broken.store(true, Ordering::Relaxed);
-                loop_result = Err(anyhow::anyhow!("event wait timeout"));
-                break;
             }
         }
 
