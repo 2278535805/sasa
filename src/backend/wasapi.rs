@@ -968,14 +968,6 @@ impl WasapiBackend {
                 Ok(())
             };
 
-        if !polling {
-            let prefill = buffer_frames_total;
-            if let Err(e) = write_block(prefill, prefill, Instant::now()) {
-                shared.broken.store(true, Ordering::Relaxed);
-                return Err(e).context("prefill render buffer");
-            }
-        }
-
         audio_client.start_stream().context("start stream")?;
 
         let exclusive = matches!(settings.share_mode, ShareMode::Exclusive);
@@ -985,13 +977,6 @@ impl WasapiBackend {
         loop {
             if !shared.running.load(Ordering::Relaxed) {
                 let _ = audio_client.stop_stream();
-                break;
-            }
-
-            if !polling && h_event.as_ref().unwrap().wait_for_event(1000).is_err() {
-                let _ = audio_client.stop_stream();
-                shared.broken.store(true, Ordering::Relaxed);
-                loop_result = Err(anyhow::anyhow!("event wait timeout"));
                 break;
             }
 
@@ -1016,6 +1001,12 @@ impl WasapiBackend {
                 (target_frames - padding).min(available)
             } else {
                 if available == 0 {
+                    if h_event.as_ref().unwrap().wait_for_event(1000).is_err() {
+                        let _ = audio_client.stop_stream();
+                        shared.broken.store(true, Ordering::Relaxed);
+                        loop_result = Err(anyhow::anyhow!("event wait timeout"));
+                        break;
+                    }
                     continue;
                 }
 
@@ -1054,6 +1045,11 @@ impl WasapiBackend {
 
             if polling {
                 std::thread::sleep(poll_interval);
+            } else if h_event.as_ref().unwrap().wait_for_event(1000).is_err() {
+                let _ = audio_client.stop_stream();
+                shared.broken.store(true, Ordering::Relaxed);
+                loop_result = Err(anyhow::anyhow!("event wait timeout"));
+                break;
             }
         }
 
