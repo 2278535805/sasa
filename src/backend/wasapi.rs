@@ -186,23 +186,13 @@ fn apply_audio_client_properties(client: &AudioClient, settings: &WasapiSettings
 
 const POLLING_BUFFER_PERIODS: i64 = 1;
 
-fn exclusive_mode(
-    timing: Timing,
-    period_hns: i64,
-    buffer_size: Option<u32>,
-    sample_rate: usize,
-) -> StreamMode {
+fn exclusive_mode(timing: Timing, period_hns: i64) -> StreamMode {
     match timing {
         Timing::Events => StreamMode::EventsExclusive { period_hns },
-        Timing::Polling => {
-            let buffer_duration_hns = buffer_size
-                .map(|buffer_size| calculate_period_100ns(buffer_size as i64, sample_rate as i64))
-                .unwrap_or(period_hns);
-            StreamMode::PollingExclusive {
-                period_hns: buffer_duration_hns.max(period_hns),
-                buffer_duration_hns: buffer_duration_hns.max(period_hns) * POLLING_BUFFER_PERIODS,
-            }
-        }
+        Timing::Polling => StreamMode::PollingExclusive {
+            period_hns,
+            buffer_duration_hns: period_hns * POLLING_BUFFER_PERIODS,
+        },
     }
 }
 
@@ -365,12 +355,7 @@ fn probe_exclusive_format(
                     }
                 };
 
-            let mut mode = exclusive_mode(
-                settings.timing,
-                desired_period,
-                settings.buffer_size,
-                supported.get_samplespersec() as usize,
-            );
+            let mut mode = exclusive_mode(settings.timing, desired_period);
 
             apply_audio_client_properties(&audio_client, settings);
 
