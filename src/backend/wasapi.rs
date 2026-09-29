@@ -889,6 +889,10 @@ impl WasapiBackend {
         let poll_interval = Duration::from_millis(1);
         let _poll_timer = polling.then(PollTimer::new);
 
+        let clock_frequency = audio_clock
+            .as_ref()
+            .and_then(|clock| clock.get_frequency().ok());
+        let mut frames_written: u64 = 0;
         let mut f32_buf = Vec::new();
         let mut byte_buf = Vec::new();
         let mut write_block =
@@ -914,21 +918,34 @@ impl WasapiBackend {
                     .write_to_device(frames as usize, &byte_buf, None)
                     .map_err(|e| anyhow::anyhow!(e))?;
 
+                frames_written += frames as u64;
+
                 let post_padding = audio_client.get_current_padding().unwrap_or(0);
                 shared
                     .current_padding
                     .store(post_padding, Ordering::Relaxed);
-                if let Some(ref clock) = audio_clock {
-                    if let Ok((pos, _timer)) = clock.get_position() {
-                        shared.clock_position.store(pos, Ordering::Relaxed);
-                    }
+
+                let device_position = audio_clock
+                    .as_ref()
+                    .and_then(|clock| clock.get_position().ok().map(|(position, _timer)| position));
+                if let Some(position) = device_position {
+                    shared.clock_position.store(position, Ordering::Relaxed);
                 }
 
-                let stream_delay_sec = if post_padding > 0 {
+                let padding_delay_sec = if post_padding > 0 {
                     post_padding as f64 / actual_sr as f64
                 } else {
                     frames as f64 / actual_sr as f64
                 };
+                let clock_delay_sec = match (device_position, clock_frequency) {
+                    (Some(position), Some(frequency)) if frequency > 0 => {
+                        let written_sec = frames_written as f64 / actual_sr as f64;
+                        let played_sec = position as f64 / frequency as f64;
+                        (written_sec - played_sec).max(0.0)
+                    }
+                    _ => 0.0,
+                };
+                let stream_delay_sec = clock_delay_sec.max(padding_delay_sec);
                 rec.push(stream_delay_sec + callback_instant.elapsed().as_secs_f64());
                 Ok(())
             };
@@ -1199,19 +1216,35 @@ impl WasapiRecorderBackend {
                 .current_padding
                 .store(post_padding, Ordering::Relaxed);
             shared.available_space.store(nbr_frames, Ordering::Relaxed);
+
+            let mut clock_position = None;
+            let mut qpc_now = None;
             if let Some(ref clock) = audio_clock {
-                if let Ok((pos, _timer)) = clock.get_position() {
-                    shared.clock_position.store(pos, Ordering::Relaxed);
+                if let Ok((position, timer)) = clock.get_position() {
+                    clock_position = Some(position);
+                    qpc_now = Some(timer);
                 }
             }
+            if let Some(position) = clock_position {
+                shared.clock_position.store(position, Ordering::Relaxed);
+            }
 
-            let stream_delay_sec = if post_padding > 0 {
+            let padding_delay_sec = if post_padding > 0 {
                 post_padding as f64 / actual_sr as f64
             } else {
                 nbr_frames as f64 / actual_sr as f64
             };
-            let total_delay_sec = stream_delay_sec + callback_instant.elapsed().as_secs_f64();
-            rec.push(total_delay_sec);
+            let stream_delay_sec = match qpc_now {
+                Some(now)
+                    if !info.flags.timestamp_error
+                        && info.timestamp > 0
+                        && now >= info.timestamp =>
+                {
+                    ((now - info.timestamp) as f64 / 10_000_000.0).max(padding_delay_sec)
+                }
+                _ => padding_delay_sec + callback_instant.elapsed().as_secs_f64(),
+            };
+            rec.push(stream_delay_sec);
 
             if polling {
                 std::thread::sleep(poll_interval);
