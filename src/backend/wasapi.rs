@@ -9,9 +9,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-pub use wasapi::{ShareMode, StreamCategory, StreamOption, calculate_period_100ns};
+pub use wasapi::{calculate_period_100ns, ShareMode, StreamCategory, StreamOption};
 use wasapi::{
-    initialize_mta, AudioClient, AudioClientProperties, AudioClock, Device,
+    deinitialize, initialize_mta, AudioClient, AudioClientProperties, AudioClock, Device,
     DeviceEnumerator, Direction, Handle, SampleType, StreamMode, WasapiError, WaveFormat,
 };
 
@@ -30,9 +30,7 @@ enum SampleConversion {
 impl SampleConversion {
     fn bytes_per_sample(self) -> usize {
         match self {
-            SampleConversion::Float32
-            | SampleConversion::Int32
-            | SampleConversion::Int24In32 => 4,
+            SampleConversion::Float32 | SampleConversion::Int32 | SampleConversion::Int24In32 => 4,
             SampleConversion::Int24 => 3,
             SampleConversion::Int16 => 2,
         }
@@ -150,9 +148,15 @@ fn sample_conversion(
 fn mode_period_hns(mode: &StreamMode) -> u32 {
     match mode {
         StreamMode::EventsExclusive { period_hns } => *period_hns as u32,
-        StreamMode::EventsShared { buffer_duration_hns, .. } => *buffer_duration_hns as u32,
+        StreamMode::EventsShared {
+            buffer_duration_hns,
+            ..
+        } => *buffer_duration_hns as u32,
         StreamMode::PollingExclusive { period_hns, .. } => *period_hns as u32,
-        StreamMode::PollingShared { buffer_duration_hns, .. } => *buffer_duration_hns as u32,
+        StreamMode::PollingShared {
+            buffer_duration_hns,
+            ..
+        } => *buffer_duration_hns as u32,
     }
 }
 
@@ -171,6 +175,13 @@ fn audio_client_properties(
         props = props.set_option(option);
     }
     props
+}
+
+fn apply_audio_client_properties(client: &AudioClient, settings: &WasapiSettings) {
+    let properties = audio_client_properties(settings.stream_category, settings.stream_option);
+    if let Err(e) = client.set_properties(properties) {
+        eprintln!("wasapi: failed to set audio client properties: {e}");
+    }
 }
 
 const POLLING_BUFFER_PERIODS: i64 = 2;
@@ -221,10 +232,13 @@ impl Drop for PollTimer {
     }
 }
 
+const AVRT_PRIORITY_CRITICAL: i32 = 2;
+
 #[link(name = "avrt")]
 extern "system" {
     fn AvSetMmThreadCharacteristicsW(task_name: *const u16, task_index: *mut u32) -> *mut c_void;
     fn AvRevertMmThreadCharacteristics(handle: *mut c_void) -> i32;
+    fn AvSetMmThreadPriority(handle: *mut c_void, priority: i32) -> i32;
 }
 
 struct MmcssGuard(*mut c_void);
@@ -236,6 +250,8 @@ impl MmcssGuard {
         let handle = unsafe { AvSetMmThreadCharacteristicsW(task_name.as_ptr(), &mut task_index) };
         if handle.is_null() {
             eprintln!("wasapi: failed to register thread with MMCSS Pro Audio");
+        } else if unsafe { AvSetMmThreadPriority(handle, AVRT_PRIORITY_CRITICAL) } == 0 {
+            eprintln!("wasapi: failed to set MMCSS thread priority to critical");
         }
         Self(handle)
     }
@@ -251,12 +267,22 @@ impl Drop for MmcssGuard {
     }
 }
 
-fn initialize_com() -> Result<()> {
-    let result = initialize_mta();
-    if result.is_err() {
-        anyhow::bail!("initialize MTA failed: {result:?}");
+struct ComGuard;
+
+impl ComGuard {
+    fn new() -> Result<Self> {
+        let result = initialize_mta();
+        if result.is_err() {
+            anyhow::bail!("initialize MTA failed: {result:?}");
+        }
+        Ok(Self)
     }
-    Ok(())
+}
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        deinitialize();
+    }
 }
 
 fn probe_exclusive_format(
@@ -268,7 +294,9 @@ fn probe_exclusive_format(
     let sample_rates: Vec<usize> = if let Some(sr) = settings.sample_rate {
         vec![sr as usize]
     } else {
-        vec![192000, 96000, 48000, 44100, 24000, 22050, 16000, 12000, 11025, 8000]
+        vec![
+            192000, 96000, 48000, 44100, 24000, 22050, 16000, 12000, 11025, 8000,
+        ]
     };
 
     let format_candidates: [(usize, usize, SampleType); 5] = [
@@ -282,14 +310,8 @@ fn probe_exclusive_format(
     let mut last_err = String::new();
     for sr in &sample_rates {
         for (storebits, validbits, sample_type) in &format_candidates {
-            let format = WaveFormat::new(
-                *storebits,
-                *validbits,
-                sample_type,
-                *sr,
-                desired_ch,
-                None,
-            );
+            let format =
+                WaveFormat::new(*storebits, *validbits, sample_type, *sr, desired_ch, None);
 
             let mut audio_client = match device.get_iaudioclient() {
                 Ok(c) => c,
@@ -335,15 +357,15 @@ fn probe_exclusive_format(
                 Timing::Polling => 0,
             };
 
-            let desired_period = match audio_client
-                .calculate_aligned_period_near(period_hns, Some(128), &supported)
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    last_err = format!("calculate_aligned_period_near: {e}");
-                    continue;
-                }
-            };
+            let desired_period =
+                match audio_client.calculate_aligned_period_near(period_hns, Some(128), &supported)
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        last_err = format!("calculate_aligned_period_near: {e}");
+                        continue;
+                    }
+                };
 
             let mut mode = exclusive_mode(
                 settings.timing,
@@ -352,10 +374,7 @@ fn probe_exclusive_format(
                 supported.get_samplespersec() as usize,
             );
 
-            let _ = audio_client.set_properties(audio_client_properties(
-                settings.stream_category,
-                settings.stream_option,
-            ));
+            apply_audio_client_properties(&audio_client, settings);
 
             match audio_client.initialize_client(&supported, &direction, &mode) {
                 Ok(()) => return Ok((audio_client, supported, conversion, mode)),
@@ -379,8 +398,8 @@ fn probe_exclusive_format(
                             period_hns: aligned_duration,
                         },
                         Timing::Polling => StreamMode::PollingExclusive {
-                            period_hns: desired_period,
-                            buffer_duration_hns: aligned_duration.max(desired_period),
+                            period_hns: aligned_duration,
+                            buffer_duration_hns: aligned_duration * POLLING_BUFFER_PERIODS,
                         },
                     };
                     drop(audio_client);
@@ -394,10 +413,7 @@ fn probe_exclusive_format(
                             continue;
                         }
                     };
-                    let _ = aligned_client.set_properties(audio_client_properties(
-                        settings.stream_category,
-                        settings.stream_option,
-                    ));
+                    apply_audio_client_properties(&aligned_client, settings);
                     match aligned_client.initialize_client(&supported, &direction, &mode) {
                         Ok(()) => return Ok((aligned_client, supported, conversion, mode)),
                         Err(e) => {
@@ -489,7 +505,11 @@ impl std::fmt::Display for WasapiStreamInfo {
         writeln!(f, "frames_per_callback: {:?}", self.frames_per_callback)?;
         writeln!(f, "default_period_hns: {:?}", self.default_period_hns)?;
         writeln!(f, "min_period_hns: {:?}", self.min_period_hns)?;
-        writeln!(f, "min_aligned_period_hns: {:?}", self.min_aligned_period_hns)?;
+        writeln!(
+            f,
+            "min_aligned_period_hns: {:?}",
+            self.min_aligned_period_hns
+        )?;
         writeln!(f, "bits_per_sample: {:?}", self.bits_per_sample)?;
         writeln!(f, "valid_bits_per_sample: {:?}", self.valid_bits_per_sample)?;
         writeln!(f, "sample_type: {:?}", self.sample_type)?;
@@ -502,6 +522,37 @@ impl std::fmt::Display for WasapiStreamInfo {
         writeln!(f, "clock_position: {:?}", self.clock_position)?;
         writeln!(f, "clock_frequency: {:?}", self.clock_frequency)?;
         Ok(())
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl WasapiSharedState {
+    fn reset(&self) {
+        self.broken.store(false, Ordering::Relaxed);
+        self.stalled.store(false, Ordering::Relaxed);
+        self.sample_rate.store(0, Ordering::Relaxed);
+        self.channels.store(0, Ordering::Relaxed);
+        self.frames_per_callback.store(0, Ordering::Relaxed);
+        *lock(&self.device_name) = None;
+        self.default_period_hns.store(0, Ordering::Relaxed);
+        self.min_period_hns.store(0, Ordering::Relaxed);
+        self.min_aligned_period_hns.store(0, Ordering::Relaxed);
+        self.bits_per_sample.store(0, Ordering::Relaxed);
+        self.valid_bits_per_sample.store(0, Ordering::Relaxed);
+        *lock(&self.sample_type) = None;
+        self.period_hns.store(0, Ordering::Relaxed);
+        self.buffer_size_frames.store(0, Ordering::Relaxed);
+        self.channel_mask.store(0, Ordering::Relaxed);
+        self.current_padding.store(0, Ordering::Relaxed);
+        self.available_space.store(0, Ordering::Relaxed);
+        self.clock_position.store(0, Ordering::Relaxed);
+        self.clock_frequency.store(0, Ordering::Relaxed);
+        *lock(&self.adapter_name) = None;
     }
 }
 
@@ -545,7 +596,7 @@ fn stream_info_from_shared(
             let v = shared.channels.load(Ordering::Relaxed);
             (v > 0).then_some(v as u16)
         },
-        device_name: shared.device_name.lock().unwrap().clone(),
+        device_name: lock(&shared.device_name).clone(),
         frames_per_callback: (frames > 0).then_some(frames),
         default_period_hns: {
             let v = shared.default_period_hns.load(Ordering::Relaxed);
@@ -567,7 +618,7 @@ fn stream_info_from_shared(
             let v = shared.valid_bits_per_sample.load(Ordering::Relaxed);
             (v > 0).then_some(v as u16)
         },
-        sample_type: shared.sample_type.lock().unwrap().clone(),
+        sample_type: lock(&shared.sample_type).clone(),
         period_hns: {
             let v = shared.period_hns.load(Ordering::Relaxed);
             (v > 0).then_some(v)
@@ -580,7 +631,7 @@ fn stream_info_from_shared(
             let v = shared.channel_mask.load(Ordering::Relaxed);
             (v > 0).then_some(v)
         },
-        adapter_name: shared.adapter_name.lock().unwrap().clone(),
+        adapter_name: lock(&shared.adapter_name).clone(),
         current_padding: Some(shared.current_padding.load(Ordering::Relaxed)),
         available_space: {
             let v = shared.available_space.load(Ordering::Relaxed);
@@ -617,8 +668,8 @@ fn setup_session(
     let device = enumerator
         .get_default_device(&direction)
         .with_context(|| format!("get default {direction} device"))?;
-    *shared.device_name.lock().unwrap() = device.get_friendlyname().ok();
-    *shared.adapter_name.lock().unwrap() = device.get_interface_friendlyname().ok();
+    *lock(&shared.device_name) = device.get_friendlyname().ok();
+    *lock(&shared.adapter_name) = device.get_interface_friendlyname().ok();
 
     let mix_format = if settings.sample_rate.is_none() || settings.channels.is_none() {
         let client = device.get_iaudioclient().context("get audio client")?;
@@ -646,9 +697,8 @@ fn setup_session(
             let desired_format =
                 WaveFormat::new(32, 32, &SampleType::Float, desired_sr, desired_ch, None);
             let mut client = device.get_iaudioclient().context("get audio client")?;
-            let (def_period, _min_period) = client
-                .get_device_period()
-                .context("get device period")?;
+            let (def_period, _min_period) =
+                client.get_device_period().context("get device period")?;
             let mode = StreamMode::EventsShared {
                 autoconvert: true,
                 buffer_duration_hns: if let Some(bs) = settings.buffer_size {
@@ -657,10 +707,7 @@ fn setup_session(
                     def_period
                 },
             };
-            let _ = client.set_properties(audio_client_properties(
-                settings.stream_category,
-                settings.stream_option,
-            ));
+            apply_audio_client_properties(&client, settings);
             client
                 .initialize_client(&desired_format, &direction, &mode)
                 .context("initialize audio client")?;
@@ -671,20 +718,35 @@ fn setup_session(
     let channels = format.get_nchannels();
 
     if let Ok((def_per, min_per)) = audio_client.get_device_period() {
-        shared.default_period_hns.store(def_per as u32, Ordering::Relaxed);
-        shared.min_period_hns.store(min_per as u32, Ordering::Relaxed);
+        shared
+            .default_period_hns
+            .store(def_per as u32, Ordering::Relaxed);
+        shared
+            .min_period_hns
+            .store(min_per as u32, Ordering::Relaxed);
     }
-    shared.period_hns.store(mode_period_hns(&mode), Ordering::Relaxed);
-    if let Ok(aligned_min) =
-        audio_client.calculate_aligned_period_near(0, Some(128), &format)
-    {
-        shared.min_aligned_period_hns.store(aligned_min as u32, Ordering::Relaxed);
+    shared
+        .period_hns
+        .store(mode_period_hns(&mode), Ordering::Relaxed);
+    if let Ok(aligned_min) = audio_client.calculate_aligned_period_near(0, Some(128), &format) {
+        shared
+            .min_aligned_period_hns
+            .store(aligned_min as u32, Ordering::Relaxed);
     }
-    shared.bits_per_sample.store(format.get_bitspersample() as u32, Ordering::Relaxed);
-    shared.valid_bits_per_sample.store(format.get_validbitspersample() as u32, Ordering::Relaxed);
-    shared.channel_mask.store(format.get_dwchannelmask(), Ordering::Relaxed);
-    shared.buffer_size_frames.store(audio_client.get_buffer_size().unwrap_or(0), Ordering::Relaxed);
-    *shared.sample_type.lock().unwrap() = match format.get_subformat() {
+    shared
+        .bits_per_sample
+        .store(format.get_bitspersample() as u32, Ordering::Relaxed);
+    shared
+        .valid_bits_per_sample
+        .store(format.get_validbitspersample() as u32, Ordering::Relaxed);
+    shared
+        .channel_mask
+        .store(format.get_dwchannelmask(), Ordering::Relaxed);
+    shared.buffer_size_frames.store(
+        audio_client.get_buffer_size().unwrap_or(0),
+        Ordering::Relaxed,
+    );
+    *lock(&shared.sample_type) = match format.get_subformat() {
         Ok(SampleType::Float) => Some("Float".into()),
         Ok(SampleType::Int) => Some("Int".into()),
         Err(_) => None,
@@ -696,7 +758,11 @@ fn setup_session(
     let h_event = if polling {
         None
     } else {
-        Some(audio_client.set_get_eventhandle().context("get event handle")?)
+        Some(
+            audio_client
+                .set_get_eventhandle()
+                .context("get event handle")?,
+        )
     };
     let audio_clock = audio_client.get_audioclock().ok();
     if let Some(ref clock) = audio_clock {
@@ -738,7 +804,7 @@ impl WasapiBackend {
         state: Arc<StateCell>,
         shared: Arc<WasapiSharedState>,
     ) -> Result<()> {
-        initialize_com()?;
+        let _com = ComGuard::new()?;
         let _mmcss = MmcssGuard::new();
 
         if matches!(settings.share_mode, ShareMode::Exclusive)
@@ -802,8 +868,7 @@ impl WasapiBackend {
         let mut f32_buf = Vec::new();
         let mut byte_buf = Vec::new();
         let exclusive = matches!(settings.share_mode, ShareMode::Exclusive);
-        let mut last_callback_instant = Instant::now();
-        let mut interval_strikes = 0u32;
+        let mut stall_tracker = (exclusive && !polling).then(|| (Instant::now(), 0u32));
         let mut loop_result = Ok(());
 
         loop {
@@ -842,18 +907,18 @@ impl WasapiBackend {
                     continue;
                 }
 
-                if exclusive {
+                if let Some((last_callback_instant, interval_strikes)) = stall_tracker.as_mut() {
                     let interval_secs = callback_instant
-                        .duration_since(last_callback_instant)
+                        .duration_since(*last_callback_instant)
                         .as_secs_f64();
-                    last_callback_instant = callback_instant;
+                    *last_callback_instant = callback_instant;
                     let expected_interval = available as f64 / actual_sr as f64;
                     if interval_secs > expected_interval * 1.5 {
-                        interval_strikes += 1;
+                        *interval_strikes += 1;
                     } else {
-                        interval_strikes = 0;
+                        *interval_strikes = 0;
                     }
-                    if interval_strikes >= 3 {
+                    if *interval_strikes >= 3 {
                         let _ = audio_client.stop_stream();
                         shared.stalled.store(true, Ordering::Relaxed);
                         eprintln!(
@@ -868,7 +933,9 @@ impl WasapiBackend {
                 available
             };
 
-            shared.frames_per_callback.store(buffer_frames, Ordering::Relaxed);
+            shared
+                .frames_per_callback
+                .store(buffer_frames, Ordering::Relaxed);
 
             let n_samples = buffer_frames as usize * actual_ch as usize;
             f32_buf.resize(n_samples, 0f32);
@@ -892,7 +959,9 @@ impl WasapiBackend {
             }
 
             let post_padding = audio_client.get_current_padding().unwrap_or(0);
-            shared.current_padding.store(post_padding, Ordering::Relaxed);
+            shared
+                .current_padding
+                .store(post_padding, Ordering::Relaxed);
             shared.available_space.store(available, Ordering::Relaxed);
             if let Some(ref clock) = audio_clock {
                 if let Ok((pos, _timer)) = clock.get_position() {
@@ -934,19 +1003,28 @@ impl Backend for WasapiBackend {
         let settings = self.settings.clone();
         let shared = Arc::clone(&self.shared);
 
+        shared.reset();
         shared.running.store(true, Ordering::Relaxed);
 
-        let join_handle = std::thread::Builder::new()
+        let thread_shared = Arc::clone(&shared);
+        let spawn_result = std::thread::Builder::new()
             .name("wasapi-playback".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    WasapiBackend::run_playback(settings, state, Arc::clone(&shared))
+                    WasapiBackend::run_playback(settings, state, Arc::clone(&thread_shared))
                 }));
                 if !matches!(result, Ok(Ok(()))) {
-                    shared.broken.store(true, Ordering::Relaxed);
+                    thread_shared.broken.store(true, Ordering::Relaxed);
                 }
-            })
-            .context("spawn playback thread")?;
+            });
+
+        let join_handle = match spawn_result {
+            Ok(handle) => handle,
+            Err(e) => {
+                shared.running.store(false, Ordering::Relaxed);
+                return Err(e).context("spawn playback thread");
+            }
+        };
 
         self.join_handle = Some(join_handle);
         Ok(())
@@ -997,7 +1075,7 @@ impl WasapiRecorderBackend {
         state: Arc<RecorderStateCell>,
         shared: Arc<WasapiSharedState>,
     ) -> Result<()> {
-        initialize_com()?;
+        let _com = ComGuard::new()?;
         let _mmcss = MmcssGuard::new();
 
         let WasapiSession {
@@ -1060,7 +1138,9 @@ impl WasapiRecorderBackend {
                 continue;
             }
 
-            shared.frames_per_callback.store(nbr_frames, Ordering::Relaxed);
+            shared
+                .frames_per_callback
+                .store(nbr_frames, Ordering::Relaxed);
 
             let n_samples = nbr_frames as usize * actual_ch as usize;
             f32_buf.resize(n_samples, 0f32);
@@ -1078,7 +1158,9 @@ impl WasapiRecorderBackend {
             }
 
             let post_padding = audio_client.get_current_padding().unwrap_or(0);
-            shared.current_padding.store(post_padding, Ordering::Relaxed);
+            shared
+                .current_padding
+                .store(post_padding, Ordering::Relaxed);
             shared.available_space.store(nbr_frames, Ordering::Relaxed);
             if let Some(ref clock) = audio_clock {
                 if let Ok((pos, _timer)) = clock.get_position() {
@@ -1121,19 +1203,28 @@ impl RecorderBackend for WasapiRecorderBackend {
         let settings = self.settings.clone();
         let shared = Arc::clone(&self.shared);
 
+        shared.reset();
         shared.running.store(true, Ordering::Relaxed);
 
-        let join_handle = std::thread::Builder::new()
+        let thread_shared = Arc::clone(&shared);
+        let spawn_result = std::thread::Builder::new()
             .name("wasapi-capture".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    WasapiRecorderBackend::run_capture(settings, state, Arc::clone(&shared))
+                    WasapiRecorderBackend::run_capture(settings, state, Arc::clone(&thread_shared))
                 }));
                 if !matches!(result, Ok(Ok(()))) {
-                    shared.broken.store(true, Ordering::Relaxed);
+                    thread_shared.broken.store(true, Ordering::Relaxed);
                 }
-            })
-            .context("spawn capture thread")?;
+            });
+
+        let join_handle = match spawn_result {
+            Ok(handle) => handle,
+            Err(e) => {
+                shared.running.store(false, Ordering::Relaxed);
+                return Err(e).context("spawn capture thread");
+            }
+        };
 
         self.join_handle = Some(join_handle);
         Ok(())
