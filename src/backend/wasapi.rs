@@ -1,4 +1,5 @@
 use std::{
+    ffi::c_void,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
@@ -10,8 +11,8 @@ use std::{
 use anyhow::{Context, Result};
 pub use wasapi::{ShareMode, StreamCategory, StreamOption, calculate_period_100ns};
 use wasapi::{
-    initialize_mta, AudioClient, AudioClientProperties, Device,
-    DeviceEnumerator, Direction, SampleType, StreamMode, WasapiError, WaveFormat,
+    initialize_mta, AudioClient, AudioClientProperties, AudioClock, Device,
+    DeviceEnumerator, Direction, Handle, SampleType, StreamMode, WasapiError, WaveFormat,
 };
 
 use super::{BackendSetup, BackendStreamInfo, RecorderBackendSetup, RecorderStateCell, StateCell};
@@ -216,6 +217,36 @@ impl Drop for PollTimer {
     fn drop(&mut self) {
         unsafe {
             timeEndPeriod(1);
+        }
+    }
+}
+
+#[link(name = "avrt")]
+extern "system" {
+    fn AvSetMmThreadCharacteristicsW(task_name: *const u16, task_index: *mut u32) -> *mut c_void;
+    fn AvRevertMmThreadCharacteristics(handle: *mut c_void) -> i32;
+}
+
+struct MmcssGuard(*mut c_void);
+
+impl MmcssGuard {
+    fn new() -> Self {
+        let task_name: Vec<u16> = "Pro Audio\0".encode_utf16().collect();
+        let mut task_index = 0u32;
+        let handle = unsafe { AvSetMmThreadCharacteristicsW(task_name.as_ptr(), &mut task_index) };
+        if handle.is_null() {
+            eprintln!("wasapi: failed to register thread with MMCSS Pro Audio");
+        }
+        Self(handle)
+    }
+}
+
+impl Drop for MmcssGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                AvRevertMmThreadCharacteristics(self.0);
+            }
         }
     }
 }
@@ -474,35 +505,222 @@ impl std::fmt::Display for WasapiStreamInfo {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct WasapiSharedState {
-    broken: Arc<AtomicBool>,
-    stalled: Arc<AtomicBool>,
-    running: Arc<AtomicBool>,
-    sample_rate: Arc<AtomicU32>,
-    channels: Arc<AtomicU32>,
-    frames_per_callback: Arc<AtomicU32>,
-    device_name: Arc<Mutex<Option<String>>>,
-    default_period_hns: Arc<AtomicU32>,
-    min_period_hns: Arc<AtomicU32>,
-    min_aligned_period_hns: Arc<AtomicU32>,
-    bits_per_sample: Arc<AtomicU32>,
-    valid_bits_per_sample: Arc<AtomicU32>,
-    sample_type: Arc<Mutex<Option<String>>>,
-    period_hns: Arc<AtomicU32>,
-    buffer_size_frames: Arc<AtomicU32>,
-    channel_mask: Arc<AtomicU32>,
-    current_padding: Arc<AtomicU32>,
-    available_space: Arc<AtomicU32>,
-    clock_position: Arc<AtomicU64>,
-    clock_frequency: Arc<AtomicU64>,
-    adapter_name: Arc<Mutex<Option<String>>>,
+    broken: AtomicBool,
+    stalled: AtomicBool,
+    running: AtomicBool,
+    sample_rate: AtomicU32,
+    channels: AtomicU32,
+    frames_per_callback: AtomicU32,
+    device_name: Mutex<Option<String>>,
+    default_period_hns: AtomicU32,
+    min_period_hns: AtomicU32,
+    min_aligned_period_hns: AtomicU32,
+    bits_per_sample: AtomicU32,
+    valid_bits_per_sample: AtomicU32,
+    sample_type: Mutex<Option<String>>,
+    period_hns: AtomicU32,
+    buffer_size_frames: AtomicU32,
+    channel_mask: AtomicU32,
+    current_padding: AtomicU32,
+    available_space: AtomicU32,
+    clock_position: AtomicU64,
+    clock_frequency: AtomicU64,
+    adapter_name: Mutex<Option<String>>,
+}
+
+fn stream_info_from_shared(
+    settings: &WasapiSettings,
+    shared: &WasapiSharedState,
+) -> WasapiStreamInfo {
+    let frames = shared.frames_per_callback.load(Ordering::Relaxed);
+    WasapiStreamInfo {
+        settings: settings.clone(),
+        sample_rate: {
+            let v = shared.sample_rate.load(Ordering::Relaxed);
+            (v > 0).then_some(v)
+        },
+        channels: {
+            let v = shared.channels.load(Ordering::Relaxed);
+            (v > 0).then_some(v as u16)
+        },
+        device_name: shared.device_name.lock().unwrap().clone(),
+        frames_per_callback: (frames > 0).then_some(frames),
+        default_period_hns: {
+            let v = shared.default_period_hns.load(Ordering::Relaxed);
+            (v > 0).then_some(v)
+        },
+        min_period_hns: {
+            let v = shared.min_period_hns.load(Ordering::Relaxed);
+            (v > 0).then_some(v)
+        },
+        min_aligned_period_hns: {
+            let v = shared.min_aligned_period_hns.load(Ordering::Relaxed);
+            (v > 0).then_some(v)
+        },
+        bits_per_sample: {
+            let v = shared.bits_per_sample.load(Ordering::Relaxed);
+            (v > 0).then_some(v as u16)
+        },
+        valid_bits_per_sample: {
+            let v = shared.valid_bits_per_sample.load(Ordering::Relaxed);
+            (v > 0).then_some(v as u16)
+        },
+        sample_type: shared.sample_type.lock().unwrap().clone(),
+        period_hns: {
+            let v = shared.period_hns.load(Ordering::Relaxed);
+            (v > 0).then_some(v)
+        },
+        buffer_size_frames: {
+            let v = shared.buffer_size_frames.load(Ordering::Relaxed);
+            (v > 0).then_some(v)
+        },
+        channel_mask: {
+            let v = shared.channel_mask.load(Ordering::Relaxed);
+            (v > 0).then_some(v)
+        },
+        adapter_name: shared.adapter_name.lock().unwrap().clone(),
+        current_padding: Some(shared.current_padding.load(Ordering::Relaxed)),
+        available_space: {
+            let v = shared.available_space.load(Ordering::Relaxed);
+            (v > 0).then_some(v)
+        },
+        clock_position: {
+            let v = shared.clock_position.load(Ordering::Relaxed);
+            (v > 0).then_some(v)
+        },
+        clock_frequency: {
+            let v = shared.clock_frequency.load(Ordering::Relaxed);
+            (v > 0).then_some(v)
+        },
+    }
+}
+
+struct WasapiSession {
+    audio_client: AudioClient,
+    format: WaveFormat,
+    conversion: SampleConversion,
+    polling: bool,
+    h_event: Option<Handle>,
+    audio_clock: Option<AudioClock>,
+    sample_rate: u32,
+    channels: u16,
+}
+
+fn setup_session(
+    settings: &WasapiSettings,
+    direction: Direction,
+    shared: &WasapiSharedState,
+) -> Result<WasapiSession> {
+    let enumerator = DeviceEnumerator::new().context("create device enumerator")?;
+    let device = enumerator
+        .get_default_device(&direction)
+        .with_context(|| format!("get default {direction} device"))?;
+    *shared.device_name.lock().unwrap() = device.get_friendlyname().ok();
+    *shared.adapter_name.lock().unwrap() = device.get_interface_friendlyname().ok();
+
+    let mix_format = if settings.sample_rate.is_none() || settings.channels.is_none() {
+        let client = device.get_iaudioclient().context("get audio client")?;
+        Some(client.get_mixformat().context("get mix format")?)
+    } else {
+        None
+    };
+
+    let desired_sr = if let Some(sr) = settings.sample_rate {
+        sr as usize
+    } else {
+        mix_format.as_ref().unwrap().get_samplespersec() as usize
+    };
+    let desired_ch = if let Some(ch) = settings.channels {
+        ch as usize
+    } else {
+        mix_format.as_ref().unwrap().get_nchannels() as usize
+    };
+
+    let (audio_client, format, conversion, mode) =
+        if matches!(settings.share_mode, ShareMode::Exclusive) {
+            probe_exclusive_format(&device, settings, desired_ch, direction)
+                .context("exclusive format not supported")?
+        } else {
+            let desired_format =
+                WaveFormat::new(32, 32, &SampleType::Float, desired_sr, desired_ch, None);
+            let mut client = device.get_iaudioclient().context("get audio client")?;
+            let (def_period, _min_period) = client
+                .get_device_period()
+                .context("get device period")?;
+            let mode = StreamMode::EventsShared {
+                autoconvert: true,
+                buffer_duration_hns: if let Some(bs) = settings.buffer_size {
+                    calculate_period_100ns(bs as i64, desired_sr as i64)
+                } else {
+                    def_period
+                },
+            };
+            let _ = client.set_properties(audio_client_properties(
+                settings.stream_category,
+                settings.stream_option,
+            ));
+            client
+                .initialize_client(&desired_format, &direction, &mode)
+                .context("initialize audio client")?;
+            (client, desired_format, SampleConversion::Float32, mode)
+        };
+
+    let sample_rate = format.get_samplespersec();
+    let channels = format.get_nchannels();
+
+    if let Ok((def_per, min_per)) = audio_client.get_device_period() {
+        shared.default_period_hns.store(def_per as u32, Ordering::Relaxed);
+        shared.min_period_hns.store(min_per as u32, Ordering::Relaxed);
+    }
+    shared.period_hns.store(mode_period_hns(&mode), Ordering::Relaxed);
+    if let Ok(aligned_min) =
+        audio_client.calculate_aligned_period_near(0, Some(128), &format)
+    {
+        shared.min_aligned_period_hns.store(aligned_min as u32, Ordering::Relaxed);
+    }
+    shared.bits_per_sample.store(format.get_bitspersample() as u32, Ordering::Relaxed);
+    shared.valid_bits_per_sample.store(format.get_validbitspersample() as u32, Ordering::Relaxed);
+    shared.channel_mask.store(format.get_dwchannelmask(), Ordering::Relaxed);
+    shared.buffer_size_frames.store(audio_client.get_buffer_size().unwrap_or(0), Ordering::Relaxed);
+    *shared.sample_type.lock().unwrap() = match format.get_subformat() {
+        Ok(SampleType::Float) => Some("Float".into()),
+        Ok(SampleType::Int) => Some("Int".into()),
+        Err(_) => None,
+    };
+    shared.sample_rate.store(sample_rate, Ordering::Relaxed);
+    shared.channels.store(channels as u32, Ordering::Relaxed);
+
+    let polling = matches!(mode, StreamMode::PollingExclusive { .. });
+    let h_event = if polling {
+        None
+    } else {
+        Some(audio_client.set_get_eventhandle().context("get event handle")?)
+    };
+    let audio_clock = audio_client.get_audioclock().ok();
+    if let Some(ref clock) = audio_clock {
+        if let Ok(freq) = clock.get_frequency() {
+            shared.clock_frequency.store(freq, Ordering::Relaxed);
+        }
+    }
+
+    Ok(WasapiSession {
+        audio_client,
+        format,
+        conversion,
+        polling,
+        h_event,
+        audio_clock,
+        sample_rate,
+        channels,
+    })
 }
 
 pub struct WasapiBackend {
     settings: WasapiSettings,
     state: Option<Arc<StateCell>>,
-    shared: WasapiSharedState,
+    shared: Arc<WasapiSharedState>,
     join_handle: Option<JoinHandle<()>>,
 }
 impl WasapiBackend {
@@ -510,7 +728,7 @@ impl WasapiBackend {
         Self {
             settings,
             state: None,
-            shared: WasapiSharedState::default(),
+            shared: Arc::new(WasapiSharedState::default()),
             join_handle: None,
         }
     }
@@ -518,9 +736,10 @@ impl WasapiBackend {
     fn run_playback(
         settings: WasapiSettings,
         state: Arc<StateCell>,
-        shared: WasapiSharedState,
+        shared: Arc<WasapiSharedState>,
     ) -> Result<()> {
         initialize_com()?;
+        let _mmcss = MmcssGuard::new();
 
         if matches!(settings.share_mode, ShareMode::Exclusive)
             && matches!(settings.timing, Timing::Polling)
@@ -556,117 +775,23 @@ impl WasapiBackend {
         state: &Arc<StateCell>,
         shared: &WasapiSharedState,
     ) -> Result<()> {
-        let enumerator = DeviceEnumerator::new().context("create device enumerator")?;
-        let device = enumerator
-            .get_default_device(&Direction::Render)
-            .context("get default output device")?;
-        let dev_name = device.get_friendlyname().ok();
-        *shared.device_name.lock().unwrap() = dev_name;
-        *shared.adapter_name.lock().unwrap() = device.get_interface_friendlyname().ok();
+        let WasapiSession {
+            audio_client,
+            conversion,
+            polling,
+            h_event,
+            audio_clock,
+            sample_rate: actual_sr,
+            channels: actual_ch,
+            ..
+        } = setup_session(settings, Direction::Render, shared)?;
 
-        let mix_format = if settings.sample_rate.is_none() || settings.channels.is_none() {
-            let client = device
-                .get_iaudioclient()
-                .context("get audio client")?;
-            Some(client.get_mixformat().context("get mix format")?)
-        } else {
-            None
-        };
-
-        let desired_sr = if let Some(sr) = settings.sample_rate {
-            sr as usize
-        } else {
-            mix_format.as_ref().unwrap().get_samplespersec() as usize
-        };
-        let desired_ch = if let Some(ch) = settings.channels {
-            ch as usize
-        } else {
-            mix_format.as_ref().unwrap().get_nchannels() as usize
-        };
-        let desired_format =
-            WaveFormat::new(32, 32, &SampleType::Float, desired_sr, desired_ch, None);
-
-        let (audio_client, actual_format, conversion, mode) = if matches!(settings.share_mode, ShareMode::Exclusive) {
-            probe_exclusive_format(&device, settings, desired_ch, Direction::Render)
-                .context("exclusive format not supported")?
-        } else {
-            let mut client = device
-                .get_iaudioclient()
-                .context("get audio client")?;
-            let (def_period, _min_period) = client
-                .get_device_period()
-                .context("get device period")?;
-            let mode = StreamMode::EventsShared {
-                autoconvert: true,
-                buffer_duration_hns: if let Some(bs) = settings.buffer_size {
-                    calculate_period_100ns(bs as i64, desired_sr as i64)
-                } else {
-                    def_period
-                },
-            };
-            let props = {
-                let mut p = AudioClientProperties::new().set_category(settings.stream_category);
-                if let Some(opt) = settings.stream_option {
-                    p = p.set_option(opt);
-                }
-                p
-            };
-            let _ = client.set_properties(props);
-            client
-                .initialize_client(&desired_format, &Direction::Render, &mode)
-                .context("initialize audio client")?;
-            (
-                client,
-                desired_format,
-                SampleConversion::Float32,
-                mode,
-            )
-        };
-
-        let actual_sr = actual_format.get_samplespersec();
-        let actual_ch = actual_format.get_nchannels();
-        let actual_ch_u32 = actual_ch as u32;
-
-        if let Ok((def_per, min_per)) = audio_client.get_device_period() {
-            shared.default_period_hns.store(def_per as u32, Ordering::Relaxed);
-            shared.min_period_hns.store(min_per as u32, Ordering::Relaxed);
-        }
-        shared.period_hns.store(mode_period_hns(&mode), Ordering::Relaxed);
-        if let Ok(aligned_min) =
-            audio_client.calculate_aligned_period_near(0, Some(128), &actual_format)
-        {
-            shared.min_aligned_period_hns.store(aligned_min as u32, Ordering::Relaxed);
-        }
-        shared.bits_per_sample.store(actual_format.get_bitspersample() as u32, Ordering::Relaxed);
-        shared.valid_bits_per_sample.store(actual_format.get_validbitspersample() as u32, Ordering::Relaxed);
-        shared.channel_mask.store(actual_format.get_dwchannelmask(), Ordering::Relaxed);
-        shared.buffer_size_frames.store(audio_client.get_buffer_size().unwrap_or(0), Ordering::Relaxed);
-        *shared.sample_type.lock().unwrap() = match actual_format.get_subformat() {
-            Ok(SampleType::Float) => Some("Float".into()),
-            Ok(SampleType::Int) => Some("Int".into()),
-            Err(_) => None,
-        };
-
-        shared.sample_rate.store(actual_sr, Ordering::Relaxed);
-        shared.channels.store(actual_ch_u32, Ordering::Relaxed);
         state.get().0.sample_rate = actual_sr;
 
         let render_client = audio_client
             .get_audiorenderclient()
             .context("get render client")?;
-        let audio_clock = audio_client.get_audioclock().ok();
-        if let Some(ref clock) = audio_clock {
-            if let Ok(freq) = clock.get_frequency() {
-                shared.clock_frequency.store(freq, Ordering::Relaxed);
-            }
-        }
 
-        let polling = matches!(mode, StreamMode::PollingExclusive { .. });
-        let h_event = if polling {
-            None
-        } else {
-            Some(audio_client.set_get_eventhandle().context("get event handle")?)
-        };
         let buffer_frames_total = audio_client.get_buffer_size().context("get buffer size")?;
         let target_frames = (buffer_frames_total / 2).max(actual_sr / 500);
         let poll_interval = Duration::from_millis(1);
@@ -807,8 +932,7 @@ impl Backend for WasapiBackend {
         self.close()?;
 
         let settings = self.settings.clone();
-        let shared = self.shared.clone();
-        let handle_broken = Arc::clone(&shared.broken);
+        let shared = Arc::clone(&self.shared);
 
         shared.running.store(true, Ordering::Relaxed);
 
@@ -816,10 +940,10 @@ impl Backend for WasapiBackend {
             .name("wasapi-playback".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    WasapiBackend::run_playback(settings, state, shared)
+                    WasapiBackend::run_playback(settings, state, Arc::clone(&shared))
                 }));
                 if !matches!(result, Ok(Ok(()))) {
-                    handle_broken.store(true, Ordering::Relaxed);
+                    shared.broken.store(true, Ordering::Relaxed);
                 }
             })
             .context("spawn playback thread")?;
@@ -841,70 +965,7 @@ impl Backend for WasapiBackend {
     }
 
     fn stream_info(&mut self) -> BackendStreamInfo {
-        let frames = self.shared.frames_per_callback.load(Ordering::Relaxed);
-        BackendStreamInfo::Wasapi(WasapiStreamInfo {
-            settings: self.settings.clone(),
-            sample_rate: {
-                let sr = self.shared.sample_rate.load(Ordering::Relaxed);
-                if sr > 0 { Some(sr) } else { None }
-            },
-            channels: {
-                let ch = self.shared.channels.load(Ordering::Relaxed);
-                if ch > 0 { Some(ch as u16) } else { None }
-            },
-            device_name: self.shared.device_name.lock().unwrap().clone(),
-            frames_per_callback: if frames > 0 { Some(frames) } else { None },
-            default_period_hns: {
-                let v = self.shared.default_period_hns.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            min_period_hns: {
-                let v = self.shared.min_period_hns.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            min_aligned_period_hns: {
-                let v = self.shared.min_aligned_period_hns.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            bits_per_sample: {
-                let v = self.shared.bits_per_sample.load(Ordering::Relaxed);
-                if v > 0 { Some(v as u16) } else { None }
-            },
-            valid_bits_per_sample: {
-                let v = self.shared.valid_bits_per_sample.load(Ordering::Relaxed);
-                if v > 0 { Some(v as u16) } else { None }
-            },
-            sample_type: self.shared.sample_type.lock().unwrap().clone(),
-            period_hns: {
-                let v = self.shared.period_hns.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            buffer_size_frames: {
-                let v = self.shared.buffer_size_frames.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            channel_mask: {
-                let v = self.shared.channel_mask.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            adapter_name: self.shared.adapter_name.lock().unwrap().clone(),
-            current_padding: {
-                let v = self.shared.current_padding.load(Ordering::Relaxed);
-                Some(v)
-            },
-            available_space: {
-                let v = self.shared.available_space.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            clock_position: {
-                let v = self.shared.clock_position.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            clock_frequency: {
-                let v = self.shared.clock_frequency.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-        })
+        BackendStreamInfo::Wasapi(stream_info_from_shared(&self.settings, &self.shared))
     }
 }
 
@@ -917,7 +978,7 @@ impl Drop for WasapiBackend {
 pub struct WasapiRecorderBackend {
     settings: WasapiSettings,
     state: Option<Arc<RecorderStateCell>>,
-    shared: WasapiSharedState,
+    shared: Arc<WasapiSharedState>,
     join_handle: Option<JoinHandle<()>>,
 }
 
@@ -926,7 +987,7 @@ impl WasapiRecorderBackend {
         Self {
             settings,
             state: None,
-            shared: WasapiSharedState::default(),
+            shared: Arc::new(WasapiSharedState::default()),
             join_handle: None,
         }
     }
@@ -934,119 +995,27 @@ impl WasapiRecorderBackend {
     fn run_capture(
         settings: WasapiSettings,
         state: Arc<RecorderStateCell>,
-        shared: WasapiSharedState,
+        shared: Arc<WasapiSharedState>,
     ) -> Result<()> {
         initialize_com()?;
+        let _mmcss = MmcssGuard::new();
 
-        let enumerator = DeviceEnumerator::new().context("create device enumerator")?;
-        let device = enumerator
-            .get_default_device(&Direction::Capture)
-            .context("get default input device")?;
-        let dev_name = device.get_friendlyname().ok();
-        *shared.device_name.lock().unwrap() = dev_name;
-        *shared.adapter_name.lock().unwrap() = device.get_interface_friendlyname().ok();
+        let WasapiSession {
+            audio_client,
+            format,
+            conversion,
+            polling,
+            h_event,
+            audio_clock,
+            sample_rate: actual_sr,
+            channels: actual_ch,
+        } = setup_session(&settings, Direction::Capture, &shared)?;
 
-        let mix_format = if settings.sample_rate.is_none() || settings.channels.is_none() {
-            let client = device
-                .get_iaudioclient()
-                .context("get audio client")?;
-            Some(client.get_mixformat().context("get mix format")?)
-        } else {
-            None
-        };
-
-        let desired_sr = if let Some(sr) = settings.sample_rate {
-            sr as usize
-        } else {
-            mix_format.as_ref().unwrap().get_samplespersec() as usize
-        };
-        let desired_ch = if let Some(ch) = settings.channels {
-            ch as usize
-        } else {
-            mix_format.as_ref().unwrap().get_nchannels() as usize
-        };
-
-        let (audio_client, actual_format, conversion, mode) = if matches!(settings.share_mode, ShareMode::Exclusive) {
-            probe_exclusive_format(&device, &settings, desired_ch, Direction::Capture)
-                .context("exclusive capture format not supported")?
-        } else {
-            let desired_format =
-                WaveFormat::new(32, 32, &SampleType::Float, desired_sr, desired_ch, None);
-            let mut client = device
-                .get_iaudioclient()
-                .context("get audio client")?;
-            let (def_period, _min_period) = client
-                .get_device_period()
-                .context("get device period")?;
-            let mode = StreamMode::EventsShared {
-                autoconvert: true,
-                buffer_duration_hns: if let Some(bs) = settings.buffer_size {
-                    calculate_period_100ns(bs as i64, desired_sr as i64)
-                } else {
-                    def_period
-                },
-            };
-            let props = {
-                let mut p = AudioClientProperties::new().set_category(settings.stream_category);
-                if let Some(opt) = settings.stream_option {
-                    p = p.set_option(opt);
-                }
-                p
-            };
-            let _ = client.set_properties(props);
-            client
-                .initialize_client(&desired_format, &Direction::Capture, &mode)
-                .context("initialize audio client")?;
-            (
-                client,
-                desired_format,
-                SampleConversion::Float32,
-                mode,
-            )
-        };
-
-        let actual_sr = actual_format.get_samplespersec();
-        let actual_ch = actual_format.get_nchannels();
-
-        if let Ok((def_per, min_per)) = audio_client.get_device_period() {
-            shared.default_period_hns.store(def_per as u32, Ordering::Relaxed);
-            shared.min_period_hns.store(min_per as u32, Ordering::Relaxed);
-        }
-        shared.period_hns.store(mode_period_hns(&mode), Ordering::Relaxed);
-        if let Ok(aligned_min) =
-            audio_client.calculate_aligned_period_near(0, Some(128), &actual_format)
-        {
-            shared.min_aligned_period_hns.store(aligned_min as u32, Ordering::Relaxed);
-        }
-        shared.bits_per_sample.store(actual_format.get_bitspersample() as u32, Ordering::Relaxed);
-        shared.valid_bits_per_sample.store(actual_format.get_validbitspersample() as u32, Ordering::Relaxed);
-        shared.channel_mask.store(actual_format.get_dwchannelmask(), Ordering::Relaxed);
-        shared.buffer_size_frames.store(audio_client.get_buffer_size().unwrap_or(0), Ordering::Relaxed);
-        *shared.sample_type.lock().unwrap() = match actual_format.get_subformat() {
-            Ok(SampleType::Float) => Some("Float".into()),
-            Ok(SampleType::Int) => Some("Int".into()),
-            Err(_) => None,
-        };
-
-        shared.sample_rate.store(actual_sr, Ordering::Relaxed);
-        shared.channels.store(actual_ch as u32, Ordering::Relaxed);
         state.get().0.sample_rate = actual_sr;
 
-        let polling = matches!(mode, StreamMode::PollingExclusive { .. });
-        let h_event = if polling {
-            None
-        } else {
-            Some(audio_client.set_get_eventhandle().context("get event handle")?)
-        };
         let capture_client = audio_client
             .get_audiocaptureclient()
             .context("get capture client")?;
-        let audio_clock = audio_client.get_audioclock().ok();
-        if let Some(ref clock) = audio_clock {
-            if let Ok(freq) = clock.get_frequency() {
-                shared.clock_frequency.store(freq, Ordering::Relaxed);
-            }
-        }
 
         audio_client.start_stream().context("start stream")?;
 
@@ -1054,7 +1023,7 @@ impl WasapiRecorderBackend {
         let _poll_timer = polling.then(PollTimer::new);
 
         let buffer_size = audio_client.get_buffer_size().context("get buffer size")? as usize;
-        let bytes_per_frame = actual_format.get_blockalign() as usize;
+        let bytes_per_frame = format.get_blockalign() as usize;
         let mut byte_buf: Vec<u8> = vec![0u8; bytes_per_frame * (buffer_size + 1024)];
         let mut f32_buf: Vec<f32> = Vec::new();
         let mut loop_result = Ok(());
@@ -1150,8 +1119,7 @@ impl RecorderBackend for WasapiRecorderBackend {
         self.close()?;
 
         let settings = self.settings.clone();
-        let shared = self.shared.clone();
-        let handle_broken = Arc::clone(&shared.broken);
+        let shared = Arc::clone(&self.shared);
 
         shared.running.store(true, Ordering::Relaxed);
 
@@ -1159,10 +1127,10 @@ impl RecorderBackend for WasapiRecorderBackend {
             .name("wasapi-capture".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    WasapiRecorderBackend::run_capture(settings, state, shared)
+                    WasapiRecorderBackend::run_capture(settings, state, Arc::clone(&shared))
                 }));
                 if !matches!(result, Ok(Ok(()))) {
-                    handle_broken.store(true, Ordering::Relaxed);
+                    shared.broken.store(true, Ordering::Relaxed);
                 }
             })
             .context("spawn capture thread")?;
@@ -1184,70 +1152,7 @@ impl RecorderBackend for WasapiRecorderBackend {
     }
 
     fn stream_info(&mut self) -> BackendStreamInfo {
-        let frames = self.shared.frames_per_callback.load(Ordering::Relaxed);
-        BackendStreamInfo::Wasapi(WasapiStreamInfo {
-            settings: self.settings.clone(),
-            sample_rate: {
-                let sr = self.shared.sample_rate.load(Ordering::Relaxed);
-                if sr > 0 { Some(sr) } else { None }
-            },
-            channels: {
-                let ch = self.shared.channels.load(Ordering::Relaxed);
-                if ch > 0 { Some(ch as u16) } else { None }
-            },
-            device_name: self.shared.device_name.lock().unwrap().clone(),
-            frames_per_callback: if frames > 0 { Some(frames) } else { None },
-            default_period_hns: {
-                let v = self.shared.default_period_hns.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            min_period_hns: {
-                let v = self.shared.min_period_hns.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            min_aligned_period_hns: {
-                let v = self.shared.min_aligned_period_hns.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            bits_per_sample: {
-                let v = self.shared.bits_per_sample.load(Ordering::Relaxed);
-                if v > 0 { Some(v as u16) } else { None }
-            },
-            valid_bits_per_sample: {
-                let v = self.shared.valid_bits_per_sample.load(Ordering::Relaxed);
-                if v > 0 { Some(v as u16) } else { None }
-            },
-            sample_type: self.shared.sample_type.lock().unwrap().clone(),
-            period_hns: {
-                let v = self.shared.period_hns.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            buffer_size_frames: {
-                let v = self.shared.buffer_size_frames.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            channel_mask: {
-                let v = self.shared.channel_mask.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            adapter_name: self.shared.adapter_name.lock().unwrap().clone(),
-            current_padding: {
-                let v = self.shared.current_padding.load(Ordering::Relaxed);
-                Some(v)
-            },
-            available_space: {
-                let v = self.shared.available_space.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            clock_position: {
-                let v = self.shared.clock_position.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-            clock_frequency: {
-                let v = self.shared.clock_frequency.load(Ordering::Relaxed);
-                if v > 0 { Some(v) } else { None }
-            },
-        })
+        BackendStreamInfo::Wasapi(stream_info_from_shared(&self.settings, &self.shared))
     }
 }
 
