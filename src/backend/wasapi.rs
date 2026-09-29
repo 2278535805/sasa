@@ -322,6 +322,14 @@ fn probe_exclusive_format(
                 }
             };
 
+            if supported.get_subformat().is_err() && *storebits == 24 {
+                last_err = format!(
+                    "{storebits}bit/{validbits}valid {:?} {}Hz: ambiguous WAVEFORMATEX fallback for packed 24-bit",
+                    sample_type, sr
+                );
+                continue;
+            }
+
             let conversion = match sample_conversion(
                 sample_type,
                 supported.get_bitspersample(),
