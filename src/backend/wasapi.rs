@@ -184,7 +184,7 @@ fn apply_audio_client_properties(client: &AudioClient, settings: &WasapiSettings
     }
 }
 
-const POLLING_BUFFER_PERIODS: i64 = 2;
+const POLLING_BUFFER_PERIODS: i64 = 1;
 
 fn exclusive_mode(
     timing: Timing,
